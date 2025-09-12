@@ -209,12 +209,12 @@ const pushResp = await ShippingAPI.pushOrder({
 console.log("🛒 Incoming orderItems:", req.body.orderItems);
 try {
   console.log("📧 Sending email to:", finalShippingAddress.email);
-//if (finalShippingAddress.email) {
-//  await sendOrderConfirmation(createdOrder, {
-//    name: finalShippingAddress.fullName,
-//    email: finalShippingAddress.email,
-//  });
-//}
+if (finalShippingAddress.email) {
+  await sendOrderConfirmation(createdOrder, {
+    name: finalShippingAddress.fullName,
+    email: finalShippingAddress.email,
+  });
+}
   console.log("✅ Order confirmation email sent");
 } catch (err) {
   console.error("❌ Failed to send order confirmation email:", err.message);
