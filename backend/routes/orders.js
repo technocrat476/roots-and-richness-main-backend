@@ -7,6 +7,10 @@ import { validateGuestOrder } from '../middleware/validateGuestOrder.js';
 import { sendEmail } from '../utils/email.js';
 import { sendOrderConfirmation } from '../utils/email.js';
 import { ShippingAPI } from "../services/shipping.js";
+import { calculateInvoice } from "../utils/invoiceCalculator.js"
+import { generateInvoicePDF, savePdfToLocal } from "../services/invoiceGenerator.js"
+import path from "path";
+import fs from "fs-extra";
 
 const router = express.Router();
 
@@ -209,12 +213,12 @@ const pushResp = await ShippingAPI.pushOrder({
 console.log("🛒 Incoming orderItems:", req.body.orderItems);
 try {
   console.log("📧 Sending email to:", finalShippingAddress.email);
-//if (finalShippingAddress.email) {
-//  await sendOrderConfirmation(createdOrder, {
-//    name: finalShippingAddress.fullName,
-//    email: finalShippingAddress.email,
-//  });
-//}
+  if (finalShippingAddress.email) {
+  await sendOrderConfirmation(createdOrder, {
+    name: finalShippingAddress.fullName,
+   email: finalShippingAddress.email,
+ });
+}
   console.log("✅ Order confirmation email sent");
 } catch (err) {
   console.error("❌ Failed to send order confirmation email:", err.message);
@@ -555,4 +559,95 @@ if (order.shipping?.reference_id && order.shipping?.awb_number) {
   }
 });
 
+// @desc    Invoice generation
+// @route   GET /api/:id/invoice
+// @access  Private
+router.get('/:id/invoice', protect, async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id).lean();
+    if (!order) return res.status(404).json({ message: 'Order not found' });
+
+    // Normalize order items before invoice calculation
+    order.items = order.orderItems?.map(it => ({
+      ...it,
+      qty: Number(it.quantity ?? it.qty ?? 1),
+      price: Number(it.price ?? it.mrp ?? 0),
+      gstPercent: Number(it.gstPercent ?? it.gst ?? 5),
+    })) ?? [];
+
+    // Calculate invoice
+  const invoiceCalc = calculateInvoice(order, {
+    gstRate: 5, // IGST %
+    shippingFee: order.shippingPrice ?? order.shippingCharge ?? 99,
+    shippingThreshold: 499,
+    codCharge: order.codFee ?? 50,
+    discountAmount: order.discountAmount ?? 0
+});
+
+    // Template payload
+    const templateData = {
+      company: {
+        name: 'Roots and Richness',
+        address: 'Indira Nagar, Ballari, Karnataka',
+        gstin: 'Your GSTIN',
+        logoUrl: 'https://yourdomain.com/static/logo.png',
+        email: 'rootsnrichness@gmail.com',
+        phone: '+91-XXXXXXXXXX'
+      },
+      order: {
+        _id: order._id,
+        orderId: order.orderId,
+        orderNumber: order.orderNumber || order._id.toString().slice(-6).toUpperCase(),
+        date: (new Date(order.createdAt)).toLocaleDateString('en-IN'),
+      },
+      customer: {
+        name: order.shippingAddress?.fullName || "N/A",
+        address: order.shippingAddress?.address || "N/A",
+        city: order.shippingAddress?.city || "N/A",
+        state: order.shippingAddress?.state || "N/A",
+        pin: order.shippingAddress?.postalCode || "N/A",
+        country: order.shippingAddress?.country || "N/A",        
+        phone: order.shippingAddress?.phone || "N/A"
+      },
+      shipping: {
+        name: order.shippingAddress?.fullName || "N/A",
+        address: order.shippingAddress?.address || "N/A",
+        city: order.shippingAddress?.city || "N/A",
+        state: order.shippingAddress?.state || "N/A",
+        pin: order.shippingAddress?.postalCode || "N/A",
+        country: order.shippingAddress?.country || "N/A",
+        phone: order.shippingAddress?.phone || "N/A"
+      },
+      invoice: invoiceCalc
+    };
+
+    // Generate PDF buffer
+    const pdfBuffer = await generateInvoicePDF(templateData);
+
+    // Save PDF temporarily
+    const savedPath = await savePdfToLocal(pdfBuffer, order._id);
+
+    // Send file
+    res.sendFile(savedPath, {
+      headers: {
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': `attachment; filename=invoice_${order.orderNumber || order._id}.pdf`
+      }
+    });
+
+    // Cleanup after response finishes
+    res.on("finish", async () => {
+      try {
+        await fs.unlink(savedPath);
+        console.log(`Temporary invoice deleted: ${savedPath}`);
+      } catch (err) {
+        console.error("Error cleaning up invoice file:", err);
+      }
+    });
+
+  } catch (err) {
+    console.error('Invoice generation error', err);
+    res.status(500).json({ message: 'Failed to generate invoice' });
+  }
+});
 export default router;

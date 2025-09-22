@@ -22,6 +22,8 @@ import couponRoutes from './routes/coupons.js';
 import uploadRoutes from './routes/upload.js';
 import subscriberRoutes from "./routes/subscribers.js";
 import contactRouter from './routes/contact.js';
+import trackRouter from "./routes/track.js";
+
 
 //dotenv.config();
 
@@ -82,6 +84,8 @@ app.use('/api/coupons', couponRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use("/api/subscribe", subscriberRoutes);
 app.use('/api/contact', contactRouter);
+app.use("/api", trackRouter);
+
 
 // 404 handler
 app.use('*', (req, res) => {
