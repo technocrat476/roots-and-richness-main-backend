@@ -19,7 +19,7 @@ export const sendEmail = async (options) => {
     const transporter = createTransporter();
 
     const mailOptions = {
-      from: `"E-Commerce Store" <${process.env.EMAIL_USER}>`,
+      from: `"Roots and Richness" <${process.env.EMAIL_USER}>`,
       to: options.email,
       subject: options.subject,
       text: options.message,
@@ -351,3 +351,33 @@ export const sendWelcomeEmail = async (user) => {
     html
   });
 };
+
+// Shipping Email
+
+export const shippedEmailTemplate = ({ orderId, courierPartner, trackingNumber }) => `
+  <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: auto; border: 1px solid #eee; border-radius: 8px; padding: 20px;">
+    <h2 style="color: #d4a441; text-align: center;">Your Order is on the Way 🚚</h2>
+    
+    <p>Dear Customer,</p>
+    <p>We’re excited to let you know that your order <strong>#${orderId}</strong> has been shipped.</p>
+
+    <div style="background: #fafafa; padding: 15px; border-radius: 6px; margin: 20px 0;">
+      <p><strong>Courier Partner:</strong> ${courierPartner}</p>
+      <p><strong>AWB Number:</strong> ${trackingNumber}</p>
+      <p><a href="${process.env.FRONTEND_URL}/track-my-order" target="_blank" style="color: #d4a441; text-decoration: none; font-weight: bold;">Track Your Order</a></p>
+    </div>
+
+    <p>You can expect your order soon. Thank you for shopping with <strong>Roots and Richness</strong>.</p>
+
+      <!-- Automated message -->
+      <p style="font-size:12px; color:#999; margin-top:25px;">
+        This is an automated message. Please do not reply directly.
+      </p>
+    </div>
+
+    <!-- Footer -->
+    <div style="background: #f4f4f4; text-align: center; padding: 15px; font-size: 12px; color: #777;">
+      &copy; ${new Date().getFullYear()} Roots and Richness. All rights reserved.<br>
+    </div>
+  </div>
+`;

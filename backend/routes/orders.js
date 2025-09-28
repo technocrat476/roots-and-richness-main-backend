@@ -6,6 +6,7 @@ import { protect, admin } from '../middleware/auth.js';
 import { validateGuestOrder } from '../middleware/validateGuestOrder.js';
 import { sendEmail } from '../utils/email.js';
 import { sendOrderConfirmation } from '../utils/email.js';
+import { shippedEmailTemplate } from '../utils/email.js';
 import { ShippingAPI } from "../services/shipping.js";
 import { calculateInvoice } from "../utils/invoiceCalculator.js"
 import { generateInvoicePDF, savePdfToLocal } from "../services/invoiceGenerator.js"
@@ -182,6 +183,7 @@ const pushResp = await ShippingAPI.pushOrder({
   warehouse_id: process.env.SHIPPING_WAREHOUSE_ID || "",
 });
       createdOrder.shipping = {
+        order_id: pushResp.data.order_id,
         reference_id: pushResp.data.reference_id,
         awb_number: pushResp.data.awb_number || null,
         status: "pushed"
@@ -444,7 +446,7 @@ if (req.query.search) {
 router.put('/:id/status', protect, admin, async (req, res) => {
   try {
     console.log("Update order called:", req.params.id, req.body);
-    const { status, trackingNumber } = req.body;
+    const { status } = req.body;
 
     const order = await Order.findById(req.params.id).populate('user', 'name email');
 
@@ -456,19 +458,44 @@ router.put('/:id/status', protect, admin, async (req, res) => {
     }
 
     order.status = status;
-    if (trackingNumber) {
-      order.trackingNumber = trackingNumber;
+
+
+    // ✅ Handle "shipped"
+    if (status === "shipped") {
+      try {
+        const shippingData = await ShippingAPI.getOrderDetail(order.shipping.order_id);
+
+        order.trackingNumber = shippingData.awbNumber;
+        order.courierPartner = shippingData.courierPartner;
+        order.shippingDetails = shippingData;
+
+        // Send premium shipped email
+        await sendEmail({
+          email: order.shippingAddress.email,
+          subject: "🎉 Your Order Has Been Shipped 🚚",
+          html: shippedEmailTemplate({
+            orderId: order.orderId,
+            courierPartner: shippingData.courierPartner,
+            trackingNumber: shippingData.awbNumber,
+            
+          }),
+        });
+      } catch (err) {
+        console.error("❌ Error fetching shipping details:", err.message);
+      }
     }
 
-    if (status === 'delivered') {
+    if (status === "delivered") {
       order.isDelivered = true;
       order.deliveredAt = Date.now();
     }
 
     const updatedOrder = await order.save();
+    //const trackingNumber = shippingDetails?.awb_number || null;
+    //const courierPartner = shippingDetails?.courier_name || "Our Courier Partner";
 
     // Send status update email
-    try {
+   /* try {
       let emailMessage = `Your order #${order._id} status has been updated to: ${status}`;
       if (trackingNumber) {
         emailMessage += `\nTracking Number: ${trackingNumber}`;
@@ -481,7 +508,7 @@ router.put('/:id/status', protect, admin, async (req, res) => {
       });
     } catch (emailError) {
       console.error('Failed to send status update email:', emailError);
-    }
+    } */
 
     res.status(200).json({
       success: true,

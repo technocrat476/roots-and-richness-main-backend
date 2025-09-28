@@ -74,4 +74,7 @@ export const ShippingAPI = {
 
   getLabel: (awb) =>
     request(`/get-order-label/${awb}`, { method: "GET" }),
+
+  getOrderDetail: (orderId) =>
+    request(`/get-order-detail/${orderId}`, { method: "GET" }),
 };

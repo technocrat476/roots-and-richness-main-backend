@@ -27,6 +27,7 @@ size: { type: String },
 variantId: { type: String },
 });
 const shippingSchema = new mongoose.Schema({
+  order_id: { type: String },
   reference_id: { type: String },   // ID from shipping partner
   awb_number: { type: String },     // Air Waybill for tracking
   courier: { type: String },        // Courier name if provided
@@ -154,6 +155,13 @@ const orderSchema = new mongoose.Schema({
   trackingNumber: {
     type: String,
     default: ''
+  },
+  courierPartner: {
+    type: String,
+    default: ''
+  },
+  shippingDetails: {
+    type: Object
   },
   notes: {
     type: String,
