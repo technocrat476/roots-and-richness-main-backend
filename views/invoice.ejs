@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Tax Invoice - <%= order.orderNumber %></title>
+  <style>
+    :root {
+      --brand: #0b6b4f;
+      --muted: #777;
+      --border: #e6e6e6;
+    }
+    body { font-family: "Inter", Arial, sans-serif; font-size: 13px; color: #222; margin: 0; padding: 24px; }
+    .header { display: flex; justify-content: space-between; align-items: center; }
+    .brand { display: flex; gap: 12px; align-items: center; }
+    .logo { width: 120px; height: auto; }
+    h1 { margin: 0; font-size: 20px; color: var(--brand); }
+    .meta { text-align: right; font-size: 12px; color: var(--muted); }
+    .section { margin-top: 24px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 8px 10px; border-bottom: 1px solid var(--border); }
+    th { text-align: left; background: #fafafa; font-weight: 600; }
+    .right { text-align: right; }
+    .muted { color: var(--muted); }
+    .total-row { font-weight: 700; font-size: 13px; background: #f5f5f5; }
+    .small { font-size: 11px; color: var(--muted); }
+    .footer { margin-top: 28px; font-size: 11px; color: var(--muted); text-align: center; }
+  </style>
+</head>
+<body>
+  <!-- Header -->
+  <div class="header">
+    <div class="brand">
+      <img class="logo" src="<%= company.logoUrl || 'https://via.placeholder.com/120x40?text=Logo' %>" alt="Logo">
+      <div>
+        <div><strong><%= company.name %></strong></div>
+        <div class="small"><%= company.address %></div>
+        <div class="small">GSTIN: <%= company.gstin %></div>
+      </div>
+    </div>
+    <div class="meta">
+      <div><strong>Tax Invoice</strong></div>
+      <div>Invoice #: <%= order.orderNumber %></div>
+      <div>Date: <%= order.date %></div>
+      <div class="small">Order ID: <%= order.orderId %></div>
+    </div>
+  </div>
+
+  <!-- Customer Info -->
+  <div class="section" style="display:flex; gap:24px;">
+    <div style="flex:1;">
+      <div class="small muted">Bill To</div>
+      <div><strong><%= customer.name %></strong></div>
+      <div class="small"><%= customer.address %></div>
+      <div class="small"><%= customer.city %></div>
+      <div class="small"><%= customer.state %></div>
+      <div class="small"><%= customer.pin %></div>
+      <div class="small"><%= customer.country %></div>
+      <div class="small"><%= customer.phone %></div>
+    </div>
+    <div style="flex:1;">
+      <div class="small muted">Ship To</div>
+      <div><strong><%= shipping.name %></strong></div>
+      <div class="small"><%= shipping.address %></div>
+      <div class="small"><%= shipping.city %></div>
+      <div class="small"><%= shipping.state %></div>
+      <div class="small"><%= shipping.pin %></div>
+      <div class="small"><%= shipping.country %></div>
+      <div class="small"><%= shipping.phone %></div>
+    </div>
+  </div>
+
+  <!-- Items Table -->
+  <div class="section">
+    <table>
+      <thead>
+        <tr>
+          <th>Item / Service</th>
+          <th class="right">Qty</th>
+          <th class="right">HSN/SAC</th>
+          <th class="right">MRP (₹)</th>
+          <th class="right">Discount (₹)</th>
+          <th class="right">After Discount (₹)</th>
+          <th class="right">Taxable Value (₹)</th>
+          <th class="right">IGST %</th>
+          <th class="right">IGST (₹)</th>
+          <th class="right">Line Total (₹)</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% invoice.items.forEach(it => { %>
+        <tr>
+          <td><%= it.name %><div class="small muted">SKU: <%= it.sku %></div></td>
+          <td class="right"><%= it.qty %></td>
+          <td class="right"><%= it.hsn %></td>
+          <td class="right"><%= it.mrp %></td>
+          <td class="right"><%= it.discountAllocated %></td>
+          <td class="right"><%= it.afterDiscount %></td>
+          <td class="right"><%= it.taxableValue %></td>
+          <td class="right"><%= it.gstPercent %></td>
+          <td class="right"><%= it.gstAmount %></td>
+          <td class="right"><%= it.lineTotal %></td>
+        </tr>
+        <% }); %>
+
+        <!-- COD Fee -->
+        <% if(invoice.cod.fee > 0) { %>
+        <tr>
+          <td>COD Handling Fee</td>
+          <td class="right">1</td>
+          <td class="right"><%= order.codHsn || '996813' %></td>
+          <td class="right"></td>
+          <td class="right"></td>
+          <td class="right"></td>
+          <td class="right"><%= invoice.cod.taxable %></td>
+          <td class="right"><%= invoice.cod.gstPercent %></td>
+          <td class="right"><%= invoice.cod.gstAmount %></td>
+          <td class="right"><%= invoice.cod.lineTotal %></td>
+        </tr>
+        <% } %>
+
+        <!-- Shipping Fee -->
+        <% if(invoice.shipping.fee > 0) { %>
+        <tr>
+          <td>Shipping Charges</td>
+          <td class="right">1</td>
+          <td class="right"><%= order.shippingHsn || '9965' %></td>
+          <td class="right"></td>
+          <td class="right"></td>
+          <td class="right"></td>
+          <td class="right"><%= invoice.shipping.taxable %></td>
+          <td class="right"><%= invoice.shipping.gstPercent %></td>
+          <td class="right"><%= invoice.shipping.gstAmount %></td>
+          <td class="right"><%= invoice.shipping.lineTotal %></td>
+        </tr>
+        <% } %>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Totals -->
+  <div class="section" style="display:flex; justify-content:flex-end;">
+    <table style="width:400px;">
+      <tbody>
+        <tr>
+          <td class="small muted">Goods Subtotal</td>
+          <td class="right"><%= invoice.goodsSubtotal %></td>
+        </tr>
+        <tr>
+          <td class="small muted">Total Discount</td>
+          <td class="right">- <%= invoice.totalDiscount %></td>
+        </tr>
+        <tr>
+          <td class="small muted">Goods Taxable</td>
+          <td class="right"><%= invoice.goodsTaxable %></td>
+        </tr>
+        <tr>
+          <td class="small muted">Total Taxable Value</td>
+          <td class="right"><%= invoice.totals.totalTaxableValue %></td>
+        </tr>
+        <tr>
+          <td class="small muted">Total IGST</td>
+          <td class="right"><%= invoice.totals.totalGst %></td>
+        </tr>
+        <tr class="total-row">
+          <td>Subtotal</td>
+          <td class="right"><%= invoice.totals.subtotal %></td>
+        </tr>
+        <tr>
+          <td class="small muted">Round Off</td>
+          <td class="right"><%= invoice.totals.roundOff %></td>
+        </tr>
+        <tr class="total-row">
+          <td>Amount Payable</td>
+          <td class="right">₹ <%= invoice.totals.amountPayable %></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Footer -->
+  <div class="footer">
+    <div>For any queries: <%= company.email %> | <%= company.phone %></div>
+    <div style="margin-top:8px;">This is a computer-generated invoice and does not require a signature.</div>
+  </div>
+</body>
+</html>
