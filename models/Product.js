@@ -72,6 +72,10 @@ const productSchema = new mongoose.Schema({
     type: String,
     default: ''
   },
+  description: {
+    type: String,
+    default: ''
+  },
   brand: {
     type: String,
     default: ''
@@ -112,6 +116,7 @@ const productSchema = new mongoose.Schema({
  howToUse: { type: [String], default: [] },
  pReview: { type: [String], default: [] },
  reviewBy: { type: [String], default: [] },
+ sourceDescription: { type: [String], default: [] },
  ingredients: { type: [String], default: [] },
   specifications: [{
     name: String,
@@ -143,6 +148,10 @@ const productSchema = new mongoose.Schema({
     default: true
   },
   isFeatured: {
+    type: Boolean,
+    default: false
+  },
+  isSale: {
     type: Boolean,
     default: false
   },
