@@ -31,15 +31,18 @@ const productSchema = new mongoose.Schema({
     trim: true,
     maxlength: [100, 'Product name cannot exceed 100 characters']
   },
-  slug: {
-    type: String,
-    required: [true, 'Please provide product slug']
-  },
-  price: {
-    type: Number,
-    required: [true, 'Please provide product price'],
-    min: [0, 'Price cannot be negative']
-  },
+    slug: {
+      type: String,
+      required: [true, 'Please provide product slug'],
+      unique: true,
+      index: true, // ✅ Faster PDP lookups
+    },
+    price: {
+      type: Number,
+      required: [true, 'Please provide product price'],
+      min: [0, 'Price cannot be negative'],
+      index: true, // ✅ Helps sorting/filtering by price
+    },
   originalPrice: {
     type: Number,
     default: 0
@@ -66,11 +69,13 @@ const productSchema = new mongoose.Schema({
       'Food',
       'Wood-Pressed Oils',
       'oils'
-    ]
+      ],
+      index: true, // ✅ For category filters
   },
   subcategory: {
     type: String,
-    default: ''
+    default: '',
+    index: true
   },
   description: {
     type: String,
@@ -82,7 +87,8 @@ const productSchema = new mongoose.Schema({
   },
   brand: {
     type: String,
-    default: ''
+    default: '',
+    index: true
   },
   images: [{
     url: {
@@ -114,8 +120,8 @@ const productSchema = new mongoose.Schema({
     width: Number,
     height: Number
   },
-  tags: [String],
-  features: [String],
+ tags: [{ type: String, index: true }], // ✅ Tag-based recommendations
+ features: [String],
  benefits: { type: [String], default: [] }, 	 
  howToUse: { type: [String], default: [] },
  pReview: { type: [String], default: [] },
@@ -140,7 +146,8 @@ const productSchema = new mongoose.Schema({
   type: Number,
   default: 0,
   min: [0, 'Rating cannot be negative'],
-  max: [5, 'Rating cannot exceed 5']
+  max: [5, 'Rating cannot exceed 5'],
+  index: true, // ✅ Sorting top-rated products
   },
   numReviews: {
     type: Number,
@@ -149,15 +156,18 @@ const productSchema = new mongoose.Schema({
   },
   isActive: {
     type: Boolean,
-    default: true
+    default: true,
+    index: true
   },
   isFeatured: {
     type: Boolean,
-    default: false
+    default: false,
+    index: true
   },
   isSale: {
     type: Boolean,
-    default: false
+    default: false,
+    index: true
   },
   seoTitle: String,
   seoDescription: String,
@@ -194,13 +204,20 @@ productSchema.pre('save', function(next) {
   next();
 });
 
-// Index for search
+// 🧭 Compound Indexes for performance
+productSchema.index({ category: 1, isActive: 1 });       // Shop listing queries
+productSchema.index({ isFeatured: 1, createdAt: -1 });   // Homepage featured products
+productSchema.index({ isSale: 1, createdAt: -1 });       // Sale section
+productSchema.index({ createdAt: -1 });                  // New arrivals
+productSchema.index({ price: 1, rating: -1 });           // Filter + sort combos
+
+// 🕵️ Text index for search
 productSchema.index({
   name: 'text',
   description: 'text',
   category: 'text',
   brand: 'text',
-  tags: 'text'
+  tags: 'text',
 });
 
 export default mongoose.model('Product', productSchema);

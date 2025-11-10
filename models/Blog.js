@@ -5,13 +5,14 @@ const blogSchema = new mongoose.Schema({
     type: String,
     required: [true, 'Please provide blog title'],
     trim: true,
-    maxlength: [200, 'Title cannot exceed 200 characters']
+    maxlength: [200, 'Title cannot exceed 200 characters'],
+    index: true // ✅ Speeds up title search & listing
   },
   slug: {
     type: String,
     required: true,
     unique: true,
-    lowercase: true
+    lowercase: true,
   },
   content: {
     type: String,
@@ -27,7 +28,8 @@ const blogSchema = new mongoose.Schema({
   },
   author: {
     type: String,
-    required: true
+    required: true,
+    index: true // ✅ For author-based filters
   },
   category: {
     type: String,
@@ -46,20 +48,24 @@ const blogSchema = new mongoose.Schema({
       'Sports',
       'Entertainment',
       'Education'
-    ]
-  },
-  tags: [String],
-  status: {
-    type: String,
-    enum: ['draft', 'published', 'archived'],
-    default: 'draft'
-  },
-  publishedAt: {
-    type: Date
-  },
-  views: {
-    type: Number,
-    default: 0
+      ],
+      index: true // ✅ For category filtering
+    },
+    tags: [{ type: String, index: true }], // ✅ Helps tag-based related blogs
+    status: {
+      type: String,
+      enum: ['draft', 'published', 'archived'],
+      default: 'draft',
+      index: true // ✅ For status filtering in admin
+    },
+    publishedAt: {
+      type: Date,
+      index: true // ✅ For sorting by publish date
+    },
+    views: {
+      type: Number,
+      default: 0,
+      index: true // ✅ For popular posts
   },
   likes: [{
     user: {
@@ -115,11 +121,17 @@ blogSchema.pre('save', function(next) {
   next();
 });
 
-// Index for search
+// 🧭 Compound Indexes
+blogSchema.index({ category: 1, status: 1, publishedAt: -1 }); // ✅ For category listings
+blogSchema.index({ status: 1, publishedAt: -1 });              // ✅ For homepage “recent posts”
+blogSchema.index({ views: -1, publishedAt: -1 });              // ✅ For trending/popular posts
+
+// 🕵️ Full-text search for SEO + user search
 blogSchema.index({
   title: 'text',
   content: 'text',
-  tags: 'text'
+  tags: 'text',
+  category: 'text'
 });
 
 export default mongoose.model('Blog', blogSchema);

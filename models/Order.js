@@ -75,9 +75,10 @@ const orderSchema = new mongoose.Schema({
   user: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
-    required: false
+    required: false,
+    index: true
   },
-  orderId: { type: String, required: true, unique: true },
+  orderId: { type: String, required: true, unique: true, index:true },
   orderItems: [orderItemSchema],
   shippingAddress: shippingAddressSchema,
   shipping: shippingSchema,
@@ -133,7 +134,8 @@ const orderSchema = new mongoose.Schema({
   isPaid: {
     type: Boolean,
     required: true,
-    default: false
+    default: false,
+    index: true
   },
   paidAt: {
     type: Date
@@ -141,7 +143,8 @@ const orderSchema = new mongoose.Schema({
   isDelivered: {
     type: Boolean,
     required: true,
-    default: false
+    default: false,
+    index: true
   },
   deliveredAt: {
     type: Date
@@ -171,8 +174,15 @@ const orderSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Generate order number
-orderSchema.pre('save', function(next) {
+// 🧭 Indexes for performance
+orderSchema.index({ createdAt: -1 });             // Sort latest orders fast
+orderSchema.index({ user: 1, createdAt: -1 });    // “My Orders” dashboard
+orderSchema.index({ orderId: 1 });                // Payment/webhook lookup
+orderSchema.index({ status: 1 });                 // Admin order filters
+orderSchema.index({ isPaid: 1, createdAt: -1 });  // Paid order analytics
+
+// Generate order number before save
+orderSchema.pre('save', function (next) {
   if (!this.orderNumber) {
     this.orderNumber = 'ORD-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9).toUpperCase();
   }
