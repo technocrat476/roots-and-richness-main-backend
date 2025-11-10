@@ -48,19 +48,16 @@ const blogSchema = new mongoose.Schema({
       'Sports',
       'Entertainment',
       'Education'
-      ],
-      index: true // ✅ For category filtering
+      ]
     },
     tags: [{ type: String, index: true }], // ✅ Helps tag-based related blogs
     status: {
       type: String,
       enum: ['draft', 'published', 'archived'],
-      default: 'draft',
-      index: true // ✅ For status filtering in admin
+      default: 'draft'
     },
     publishedAt: {
-      type: Date,
-      index: true // ✅ For sorting by publish date
+      type: Date
     },
     views: {
       type: Number,
