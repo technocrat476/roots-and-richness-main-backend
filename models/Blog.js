@@ -64,6 +64,11 @@ const blogSchema = new mongoose.Schema({
       default: 0,
       index: true // ✅ For popular posts
   },
+  featured: {
+    type: Boolean,
+    default: false,
+    index: true
+  },
   likes: [{
     user: {
       type: mongoose.Schema.Types.ObjectId,
