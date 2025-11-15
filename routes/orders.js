@@ -617,7 +617,7 @@ router.get('/:id/invoice', protect, async (req, res) => {
         name: 'Roots and Richness',
         address: 'Indira Nagar, Ballari, Karnataka',
         gstin: 'Your GSTIN',
-        logoUrl: 'https://yourdomain.com/static/logo.png',
+        logoUrl: 'https://ik.imagekit.io/rrcdn/Favicons/android-chrome-512x512.png?updatedAt=1758825398241',
         email: 'rootsnrichness@gmail.com',
         phone: '+91-XXXXXXXXXX'
       },

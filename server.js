@@ -24,7 +24,6 @@ import subscriberRoutes from "./routes/subscribers.js";
 import contactRouter from './routes/contact.js';
 import trackRouter from "./routes/track.js";
 
-
 //dotenv.config();
 
 const app = express();
@@ -85,7 +84,6 @@ app.use('/api/upload', uploadRoutes);
 app.use("/api/subscribe", subscriberRoutes);
 app.use('/api/contact', contactRouter);
 app.use("/api", trackRouter);
-
 
 // 404 handler
 app.use('*', (req, res) => {
