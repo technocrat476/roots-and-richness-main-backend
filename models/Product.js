@@ -128,6 +128,7 @@ const productSchema = new mongoose.Schema({
  features: [String],
  benefits: { type: [String], default: [] }, 	 
  howToUse: { type: [String], default: [] },
+ howToUseImage: { type: [String], default: [] },
  pReview: { type: [String], default: [] },
  reviewBy: { type: [String], default: [] },
  sourceDescription: { type: [String], default: [] },
