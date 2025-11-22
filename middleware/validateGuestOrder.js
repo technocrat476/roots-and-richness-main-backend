@@ -15,7 +15,7 @@ export const validateGuestOrder = [
     .withMessage('Subtotal must be a valid number'),
 
   body('paymentProvider')
-    .isIn(['cod', 'stripe', 'razorpay'])
+    .isIn(['cod', 'stripe', 'razorpay', 'phonepe'])
     .withMessage('Invalid payment provider'),
 
   body('customerInfo.firstName')

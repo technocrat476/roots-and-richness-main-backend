@@ -85,7 +85,7 @@ const orderSchema = new mongoose.Schema({
   paymentMethod: {
     type: String,
     required: true,
-    enum: ['stripe', 'razorpay', 'cod']
+    enum: ['stripe', 'razorpay', 'cod', 'phonepe']
   },
   invoice: {
     pdfUrl: { type: String },          // optional - S3/url or local path
