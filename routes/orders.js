@@ -232,6 +232,7 @@ try {
     });
 
   } catch (error) {
+    console.error("❌ Order creation error:", error);
     res.status(500).json({
       success: false,
       message: 'Server error',
