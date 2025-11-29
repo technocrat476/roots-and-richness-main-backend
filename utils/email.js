@@ -1,17 +1,4 @@
-import nodemailer from 'nodemailer';
-
-// Create transporter
-const createTransporter = () => {
-  return nodemailer.createTransport({
-    host: process.env.EMAIL_HOST,
-    port: process.env.EMAIL_PORT,
-    secure: false, // true for 465, false for other ports
-    auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS
-    }
-  });
-};
+import { createTransporter } from './emailTransportBrevo.js';
 
 // Send email function
 export const sendEmail = async (options) => {
