@@ -3,25 +3,14 @@ import express from 'express';
 import rateLimit from 'express-rate-limit';
 import { body, validationResult } from 'express-validator';
 import dotenv from 'dotenv';
-import nodemailer from 'nodemailer';
+import { createTransporter } from '../utils/emailTransportBrevo.js';
 
 dotenv.config();
 
 const router = express.Router();
 const limiter = rateLimit({ windowMs: 60*1000, max: 6 });
 
-const transporter = nodemailer.createTransport({
-  host: process.env.EMAIL_HOST,
-  port: Number(process.env.SMTP_PORT || 587),
-  secure: false,
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS
-  }
-});
-
-// verify transporter on start (optional)
-transporter.verify().then(() => console.log('SMTP ready')).catch(err => console.warn('SMTP verify failed', err));
+const transporter = createTransporter();
 
 router.post(
   '/',
