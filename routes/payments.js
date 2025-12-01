@@ -161,11 +161,6 @@ async function getAuthToken() {
     params.append('client_secret', process.env.PHONEPE_CLIENT_SECRET);      // Your Client Secret
     params.append('grant_type', 'client_credentials');
 
-// 👇 ADD THIS LINE FOR DEBUGGING
-    console.log("DEBUG: Auth Request Payload:", params.toString());
-    console.log("DEBUG: Auth URL:", AUTH_URL);
-    // 👆 ADD THIS LINE FOR DEBUGGING
-
     const response = await axios.post(AUTH_URL, params, {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
     });
