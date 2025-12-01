@@ -162,6 +162,11 @@ app.use(express.urlencoded({ extended: true, limit: GLOBAL_JSON_LIMIT }));
 app.use(cookieParser());
 
 /* ──────────────────────────────────────────
+   PhonePe Webhook
+────────────────────────────────────────── */
+app.post('/api/payments/phonepe/webhook', express.raw({ type: 'application/json' }), webhookHandler);
+
+/* ──────────────────────────────────────────
    Input Hardening (NoSQL injection, XSS, HPP)
 ────────────────────────────────────────── */
 app.use(mongoSanitize());
