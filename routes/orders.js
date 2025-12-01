@@ -28,8 +28,6 @@ router.post('/', validateGuestOrder, async (req, res) => {
       couponCode,
       discountAmount
     } = req.body;
-    console.log(req.body);
-    console.log("📥 Incoming order body:", JSON.stringify(req.body, null, 2));
 const finalShippingAddress = shippingAddress || {
   fullName: `${customerInfo.firstName} ${customerInfo.lastName}`,
   email: shippingAddress?.email || customerInfo.email,
@@ -126,9 +124,7 @@ for (const item of orderItems) {
       discountAmount
     });
 
-console.log("💾 Final order object before save:", finalOrderItems);
     const createdOrder = await order.save();
-console.log("📤 Sending order response:", JSON.stringify(createdOrder, null, 2));
     //if (bulkOps.length) await Product.bulkWrite(bulkOps);
        if (bulkOps.length) {
   await Product.bulkWrite(bulkOps);
@@ -190,7 +186,6 @@ const pushResp = await ShippingAPI.pushOrder({
       };
       await createdOrder.save();
 
-      console.log("✅ Shipping pushed:", pushResp.message);
     } catch (err) {
       console.error("❌ Shipping API failed:", err.message);
     }
@@ -212,7 +207,6 @@ const pushResp = await ShippingAPI.pushOrder({
 //} catch (err) {
 //  console.error("❌ Pickup scheduling failed:", err.message);
 //}
-console.log("🛒 Incoming orderItems:", req.body.orderItems);
 try {
   console.log("📧 Sending email to:", finalShippingAddress.email);
   if (finalShippingAddress.email) {

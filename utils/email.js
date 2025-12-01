@@ -96,7 +96,7 @@ export const sendOrderConfirmation = async (order, user) => {
     <body>
       <div class="container">
         <div class="header">
-          <h2>Order Confirmation</h2>
+          <h2>🎉 Your Order has been confirmed</h2>
         </div>
         <div class="content">
           <p>Hi <strong>${user.name || order.shippingAddress.fullName}</strong>,</p>
@@ -180,7 +180,7 @@ export const sendOrderConfirmation = async (order, user) => {
 
   await sendEmail({
     email: user.email || order.shippingAddress.email,
-    subject: `Order Confirmation - #${order.orderId}`,
+    subject: `🎉 Order Confirmation - #${order.orderId}`,
     html
   });
 };

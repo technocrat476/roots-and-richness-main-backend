@@ -33,6 +33,8 @@
     "nanoid": "^5.1.6",
     "node-fetch": "^3.3.2",
     "nodemailer": "^6.9.7",
+    "pg-sdk-node": "https://phonepe.mycloudrepo.io/public/repositories/phonepe-pg-sdk-node/releases/v2/phonepe-pg-sdk-node.tgz",
+    "phonepe-pg-sdk-node": "^2.0.2",
     "puppeteer": "^24.21.0",
     "razorpay": "^2.9.2",
     "stripe": "^14.9.0",

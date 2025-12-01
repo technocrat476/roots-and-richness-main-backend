@@ -24,6 +24,9 @@ import { protect } from '../middleware/auth.js';
 import { optionalAuth } from '../middleware/auth.js'; // if available (guest checkout)
 import rateLimit from 'express-rate-limit';
 import { COUPON_RULES } from "../utils/couponRules.js";
+import { StandardCheckoutPayRequest, StandardCheckoutStatusRequest } from "../utils/phonepeClient.js";
+import { phonepe } from "../utils/phonepeClient.js";
+import axios from "axios";
 
 const router = express.Router();
 router.use(express.json());
@@ -143,102 +146,132 @@ async function computeTotalsFromDb(orderItems) {
     breakdownItems
   };
 }
+async function getAuthToken() {
+  try {
+    // ⚠️ PRODUCTION URLs
+    // Auth: https://api.phonepe.com/apis/identity-manager/v1/oauth/token
+    // Pay:  https://api.phonepe.com/apis/pg/checkout/v2/pay
+    
+    // ⚠️ SANDBOX URLs (Use these for testing)
+    const AUTH_URL = "https://api.phonepe.com/apis/identity-manager/v1/oauth/token";
+    
+    const params = new URLSearchParams();
+    params.append('client_id', process.env.PHONEPE_CLIENT_ID);
+    params.append('client_version', process.env.PHONEPE_CLIENT_VERSION); // e.g., "1"
+    params.append('client_secret', process.env.PHONEPE_CLIENT_SECRET);      // Your Client Secret
+    params.append('grant_type', 'client_credentials');
+
+// 👇 ADD THIS LINE FOR DEBUGGING
+    console.log("DEBUG: Auth Request Payload:", params.toString());
+    console.log("DEBUG: Auth URL:", AUTH_URL);
+    // 👆 ADD THIS LINE FOR DEBUGGING
+
+    const response = await axios.post(AUTH_URL, params, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+    });
+
+    return response.data.access_token;
+  } catch (error) {
+    console.error("PhonePe Auth Error:", error.response?.data || error.message);
+    throw new Error("Failed to generate PhonePe Auth Token");
+  }
+}
 
 /* ---------------------------
    PhonePe: create order (initiates external PhonePe payment page)
    - requires a PaymentIntent created previously (initiate-intent)
    - safe: validates the intent belongs to user (if user available) and is pending
    --------------------------- */
-router.post('/phonepe/create-order', createIntentLimiter, optionalAuth, async (req, res) => {
+router.post("/phonepe/create-order", async (req, res) => {
   try {
     const { intentId } = req.body;
-    if (!intentId) return res.status(400).json({ success: false, message: 'Missing intentId' });
 
+    // 1️⃣ Fetch intent and validate
     const intent = await PaymentIntent.findOne({ intentId });
-    if (!intent) return res.status(404).json({ success: false, message: 'Intent not found' });
+    if (!intent) return res.status(404).json({ success: false, message: "Intent not found" });
 
-    if (intent.user && req.user && String(intent.user) !== String(req.user.id)) {
-      return res.status(403).json({ success: false, message: 'Permission denied for this intent' });
-    }
-
-    if (intent.status !== 'pending') {
-      return res.status(400).json({ success: false, message: 'Intent not in pending state' });
-    }
-
-    // Recompute totals from DB
+    // 2️⃣ Compute totals
     const computed = await computeTotalsFromDb(intent.orderItems);
     if (computed.totalPaise !== intent.totals.totalPaise) {
-      intent.status = 'failed';
-      await intent.save();
-      return res.status(400).json({ success: false, message: 'Amount mismatch with server records' });
+      return res.status(400).json({ success: false, message: "Amount mismatch" });
     }
 
-    const merchantTransactionId = `txn_${intentId}_${Date.now()}`;
-    const payload = {
-      merchantId: process.env.PHONEPE_MERCHANT_ID,
-      merchantTransactionId,
-      amount: computed.totalPaise,
-      redirectUrl: `${process.env.CLIENT_URL}/order-confirmation`,
-      callbackUrl: `${process.env.SERVER_URL}/api/payments/phonepe/callback`,
-      paymentInstrument: { type: "PAY_PAGE" }
-    };
-
-    const base64Payload = Buffer.from(JSON.stringify(payload)).toString('base64');
-    const checksum = crypto
-      .createHash('sha256')
-      .update(base64Payload + "/pg/v1/pay" + (process.env.PHONEPE_SALT_KEY || ''))
-      .digest('hex') + "###" + (process.env.PHONEPE_SALT_INDEX || '');
-
-    const phonepeResp = await fetch(`${process.env.PHONEPE_BASE_URL}/pg/v1/pay`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-VERIFY': checksum
-      },
-      body: JSON.stringify({ request: base64Payload })
-    }).then(r => r.json());
-
-    console.log('🔥 PhonePe response:', phonepeResp);
-    console.log('🔥 PhonePe redirectUrl:', payload.redirectUrl);
-
-    // Save attempt
-    intent.attempts.push({
-      attemptId: `att_${nanoid(8)}`,
-      createdAt: new Date(),
-      amountPaise: computed.totalPaise,
-      gatewayResponse: safeJson(phonepeResp),
-      status: phonepeResp.success ? 'initiated' : 'failed'
-    });
-    intent.status = phonepeResp.success ? 'initiated' : 'failed';
+    // 3️⃣ Generate Unique Order ID
+    const merchantOrderId = `mo_${intentId}_${Date.now()}`;
+    intent.merchantOrderId = merchantOrderId;
     await intent.save();
 
-    if (phonepeResp.success) {
-      const vpa = process.env.PHONEPE_MERCHANT_VPA || 'merchant@upi';
-      const upiLink = `upi://pay?pa=${encodeURIComponent(vpa)}&pn=${encodeURIComponent('Roots & Richness')}&am=${(computed.totalPaise / 100).toFixed(2)}&cu=INR&tid=${merchantTransactionId}`;
+    // 4️⃣ Get OAuth Token (Latest V2 Flow Requirement)
+    const accessToken = await getAuthToken();
+
+    // 5️⃣ Prepare V2 Payload
+    // Note: V2 Payload structure is cleaner
+    const payload = {
+      merchantOrderId: merchantOrderId,
+      amount: computed.totalPaise,
+      merchantId: process.env.PHONEPE_CLIENT_ID,
+      paymentInstrument: {
+        type: "PAY_PAGE"
+      },
+      deviceContext: {
+        deviceOS: "WEB"
+      },
+      redirectUrl: `${process.env.CLIENT_URL}/payment-status?txn=${merchantOrderId}`,
+      callbackUrl: `${process.env.API_URL}/api/payments/phonepe/callback`,
+      mobileNumber: intent.customerInfo?.phone
+    };
+
+    // 6️⃣ Send Payment Request
+    // V2 uses the "O-Bearer" token in Authorization header
+    const PAY_URL = "https://api.phonepe.com/apis/pg/checkout/v2/pay"; // Sandbox
+    // const PAY_URL = "https://api.phonepe.com/apis/pg/checkout/v2/pay"; // Production
+
+    const response = await axios.post(PAY_URL, payload, {
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `O-Bearer ${accessToken}` // ⚠️ Critical: "O-Bearer" not just "Bearer"
+      }
+    });
+
+    // 7️⃣ Handle Success
+    if (response.data && response.data.data) {
+      const redirectUrl = response.data.data.instrumentResponse.redirectInfo.url;
+
+      // Update DB
+      intent.attempts.push({
+        attemptId: `att_${nanoid(8)}`,
+        createdAt: new Date(),
+        status: "initiated",
+        gatewayResponse: response.data,
+        amountPaise: computed.totalPaise,
+      });
+      intent.status = "initiated";
+      await intent.save();
+
       return res.json({
         success: true,
-        data: { phonepe: phonepeResp, upiLink, merchantTransactionId }
+        merchantOrderId,
+        redirectUrl
       });
     } else {
-      // Payment page could not be created
-      return res.status(400).json({
-        success: false,
-        message: 'PhonePe order creation failed',
-        info: phonepeResp
-      });
+        throw new Error("Invalid response from PhonePe");
     }
 
   } catch (err) {
-    console.error('phonepe/create-order error:', err?.message || err);
-    return res.status(500).json({ success: false, message: 'PhonePe order creation failed' });
+    console.error("PhonePe V2 Error:", err.response?.data || err.message);
+    return res.status(500).json({ 
+        success: false, 
+        message: "Payment initiation failed", 
+        error: err.response?.data?.message || err.message 
+    });
   }
 });
-
 /* ---------------------------
    Initiate intent (create PaymentIntent record)
    - public (optionalAuth supports guest users)
    - computes totals server-side (prevents price tampering)
    --------------------------- */
+// POST /api/payments/phonepe/initiate-intent
 router.post('/phonepe/initiate-intent', createIntentLimiter, optionalAuth, async (req, res) => {
   try {
     const { orderItems, customerInfo, shippingAddress, couponCode } = req.body;
@@ -246,45 +279,36 @@ router.post('/phonepe/initiate-intent', createIntentLimiter, optionalAuth, async
     const v = validateOrderItemsShape(orderItems);
     if (v) return res.status(400).json({ success: false, message: v });
 
-    // Ensure customerInfo minimal shape
-        if (customerInfo && !customerInfo.fullName) {
-  customerInfo.fullName = `${customerInfo.firstName || ''} ${customerInfo.lastName || ''}`.trim();
-}
-    if (!customerInfo || !customerInfo.email || !customerInfo.fullName) {
-      return res.status(400).json({ success: false, message: 'Missing customerInfo (email, fullName)' });
+    if (!customerInfo?.email || !customerInfo?.fullName) {
+      return res.status(400).json({ success: false, message: "Missing customerInfo" });
     }
 
-    // Compute totals from DB (secure)
     const computed = await computeTotalsFromDb(orderItems);
 
-    // Create PaymentIntent with link to user if present
-    const newIntent = new PaymentIntent({
+    const intent = new PaymentIntent({
       intentId: `pi_${nanoid(12)}`,
+      merchantOrderId: null,
       user: req.user?.id || null,
       orderItems,
       customerInfo,
       shippingAddress: shippingAddress || {},
       totals: {
-        itemsPrice: computed.subtotal,
-        shippingPrice: computed.shippingFee,
-        discountAmount: computed.discountAmount,
-        codFee: 0,
-        tax: computed.tax,
-        total: computed.total,
-        totalPaise: computed.totalPaise
+        ...computed,
+        totalPaise: computed.totalPaise,
       },
-      status: 'pending',
-      createdAt: new Date(),
+      status: "pending",
+      attempts: [],
       couponCode: couponCode || null,
-      attempts: []
+      createdAt: new Date(),
     });
 
-    await newIntent.save();
+    await intent.save();
 
-    return res.json({ success: true, intentId: newIntent.intentId });
+    return res.json({ success: true, intentId: intent.intentId });
+
   } catch (err) {
-    console.error('initiate-intent error:', err?.message || err);
-    return res.status(500).json({ success: false, message: 'Failed to create payment intent' });
+    console.error("initiate-intent error:", err);
+    return res.status(500).json({ success: false, message: "Failed to create intent" });
   }
 });
 
@@ -293,135 +317,78 @@ router.post('/phonepe/initiate-intent', createIntentLimiter, optionalAuth, async
    - public endpoint (PhonePe will call)
    - MUST verify signature per PhonePe docs — implementation below attempts a verification if header present.
    --------------------------- */
-router.post("/phonepe/callback", express.raw({ type: "*/*" }), async (req, res) => {
+// POST /api/payments/phonepe/callback
+router.post("/phonepe/callback", express.json(), async (req, res) => {
   try {
-    const SALT_KEY = process.env.PHONEPE_SALT_KEY;
-    const SALT_INDEX = process.env.PHONEPE_SALT_INDEX;
+    const { merchantOrderId } = req.body?.data || {};
+    if (!merchantOrderId) return res.status(400).send("Missing merchantOrderId");
 
-    // PhonePe sends JSON
-    const callbackBodyStr = req.body.toString();
-    const callbackJson = JSON.parse(callbackBodyStr);
-
-    const data = callbackJson.data;
-    if (!data || !data.merchantTransactionId) {
-      console.error("❌ Callback missing merchantTransactionId");
-      return res.status(400).send("Invalid callback");
-    }
-
-    const merchantTransactionId = data.merchantTransactionId;
-
-    // ----------------------------
-    // 🔒 1. Fetch intent
-    // ----------------------------
-    const intent = await PaymentIntent.findOne({ intentId: merchantTransactionId });
+    const intent = await PaymentIntent.findOne({ merchantOrderId });
     if (!intent) {
-      console.error("❌ PaymentIntent not found for callback:", merchantTransactionId);
+      console.error("Intent not found for callback:", merchantOrderId);
       return res.status(404).send("Intent not found");
     }
 
-    // ----------------------------
-    // 🔒 2. Prevent replay attacks
-    // ----------------------------
-    if (intent.status === "paid") {
-      console.log("ℹ️ Callback replay ignored — already processed:", merchantTransactionId);
-      return res.status(200).json({ success: true });
-    }
+    // Query latest status from SDK
+    const statusReq = StandardCheckoutStatusRequest.build_request({
+      merchantOrderId
+    });
 
-    // ----------------------------
-    // 🔒 3. Verify PhonePe signature
-    // ----------------------------
-    const receivedSignature = req.headers["x-verify"];
-    if (!receivedSignature) {
-      console.error("❌ Missing x-verify header");
-      return res.status(401).send("Signature missing");
-    }
+    const statusResp = await phonepe.getStatus(statusReq);
 
-    // Callback payload verification uses /pg/v1/status
-    // VERY IMPORTANT: PhonePe documentation requires this
-    const base64Body = Buffer.from(callbackBodyStr).toString("base64");
-    const verificationString = base64Body + "/pg/v1/status" + SALT_KEY;
+    if (!statusResp.success)
+      return res.status(200).json({ success: false });
 
-    const computedHash = crypto
-      .createHash("sha256")
-      .update(verificationString)
-      .digest("hex");
+    const paymentState = statusResp.data.state;
 
-    const computedVerify = `${computedHash}###${SALT_INDEX}`;
-
-    // Constant-time compare
-    const validSignature = crypto.timingSafeEqual(
-      Buffer.from(computedVerify),
-      Buffer.from(receivedSignature)
-    );
-
-    if (!validSignature) {
-      console.error("❌ Invalid PhonePe Signature!");
-      return res.status(403).send("Signature invalid");
-    }
-
-    // ----------------------------
-    // 🚀 4. Payment SUCCESS
-    // ----------------------------
-    if (data.paymentState === "COMPLETED") {
+    if (paymentState === "COMPLETED") {
       intent.status = "paid";
-      intent.gatewayResponse = data;
+      intent.gatewayResponse = statusResp.data;
       await intent.save();
 
-      // ---------------------------
-      // 🛒 5. Create Order
-      // ---------------------------
+      // Create Order
       const order = new Order({
-        orderId: merchantTransactionId,
+        orderId: merchantOrderId,
         orderItems: intent.orderItems,
         customerInfo: intent.customerInfo,
         shippingAddress: intent.shippingAddress,
-        subtotal: intent.subtotal,
-        tax: intent.tax,
-        shippingFee: intent.shippingFee,
-        discountAmount: intent.discountAmount,
-        codCharges: 0,
-        total: intent.amount / 100,
+        subtotal: intent.totals.subtotal,
+        tax: intent.totals.tax,
+        discountAmount: intent.totals.discountAmount,
+        shippingFee: intent.totals.shippingFee,
+        total: intent.totals.total,
         paymentProvider: "phonepe",
-        paymentId: data.transactionId,
         paymentStatus: "paid",
-        intentId: merchantTransactionId,
+        intentId: intent.intentId,
+        paymentId: statusResp.data.transactionId,
       });
 
       await order.save();
 
-      // ---------------------------
-      // 📉 6. Reduce Stock
-      // ---------------------------
+      // Reduce Stock
       for (let item of intent.orderItems) {
         const product = await Product.findById(item.product);
-
         if (item.variantId) {
           const variant = product.variants.id(item.variantId);
           variant.stock -= item.quantity;
         } else {
           product.stock -= item.quantity;
         }
-
         await product.save();
       }
 
-      console.log("✅ Order created & stock updated for:", merchantTransactionId);
-
+      console.log("Order created:", merchantOrderId);
       return res.status(200).json({ success: true });
     }
 
-    // ----------------------------
-    // ❌ 7. PAYMENT FAILED
-    // ----------------------------
+    // Failed or expired
     intent.status = "failed";
-    intent.gatewayResponse = data;
     await intent.save();
 
-    console.log("❌ PhonePe payment FAILED:", data);
-
     return res.status(200).json({ success: true });
+
   } catch (err) {
-    console.error("❌ PhonePe callback error:", err);
+    console.error("PhonePe callback error:", err);
     return res.status(500).send("Server error");
   }
 });
