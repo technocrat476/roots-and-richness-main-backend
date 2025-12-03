@@ -20,7 +20,7 @@ export const COUPON_RULES = [
     description: '5% OFF on orders above ₹299'
   },
   {
-    id: '3',
+    id: '4',
     code: 'FREESHIP',
     type: 'flat',
     value: 75,
@@ -28,5 +28,15 @@ export const COUPON_RULES = [
     expiryDate: '2025-05-15',
     isActive: true,
     description: '₹75 OFF (Free Shipping) on orders above ₹699'
+  },
+  {
+    id: '3',
+    code: 'TEST',
+    type: 'percent',
+    value: 99.8,
+    minOrderValue: 1,
+    expiryDate: '2025-12-18',
+    isActive: true,
+    description: '5% OFF on orders above ₹299'
   }
 ];
