@@ -16,7 +16,7 @@ import express from 'express';
 import Stripe from 'stripe';
 import Razorpay from 'razorpay';
 import crypto from 'crypto';
-import { nanoid } from 'nanoid';
+import { nanoid, customAlphabet } from 'nanoid';
 import Product from '../models/Product.js';
 import Order from '../models/Order.js';
 import PaymentIntent from '../models/PaymentIntent.js';
@@ -24,6 +24,7 @@ import { protect } from '../middleware/auth.js';
 import { optionalAuth } from '../middleware/auth.js'; // if available (guest checkout)
 import rateLimit from 'express-rate-limit';
 import { COUPON_RULES } from "../utils/couponRules.js";
+import { createOrderFromIntent }  from "../services/orderService.js";
 import { StandardCheckoutPayRequest, StandardCheckoutStatusRequest } from "../utils/phonepeClient.js";
 import axios from "axios";
 
@@ -47,6 +48,13 @@ const createIntentLimiter = rateLimit({
   legacyHeaders: false,
   message: { success: false, message: 'Too many create-intent requests, try later' }
 });
+
+function makeMerchantOrderId() {
+  const dt = new Date().toISOString().replace(/[-:.TZ]/g,'').slice(0,14); // e.g. 20251202T140323 -> compact
+  return `RNR-${dt}-${nanoid()}`;
+}
+const nanoidShort = customAlphabet('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz', 8);
+function makePublicOrderId() { return `PHNPE_${nanoidShort()}`; }
 
 /* ---------------------------
    Utility helpers
@@ -211,92 +219,257 @@ async function getAuthToken() {
    PhonePe: create order (initiates external PhonePe payment page)
    - requires a PaymentIntent created previously (initiate-intent)
    --------------------------- */
+// POST /api/payments/phonepe/create-order
 router.post("/phonepe/create-order", async (req, res) => {
   try {
-    const { intentId } = req.body;
-    if (!intentId) return res.status(400).json({ success: false, message: "Missing intentId" });
+    const { intentId, couponCode: frontendCouponCode } = req.body;
 
-    // 1️⃣ Fetch intent and validate
-    const intent = await PaymentIntent.findOne({ intentId });
-    if (!intent) return res.status(404).json({ success: false, message: "Intent not found" });
-
-    // 2️⃣ Compute totals and validate amounts
-    const computed = await computeTotalsFromDb(intent.orderItems);
-    if (computed.totalPaise !== (intent.totals?.totalPaise || computed.totalPaise)) {
-      return res.status(400).json({ success: false, message: "Amount mismatch" });
+    if (!intentId) {
+      return res.status(400).json({
+        success: false,
+        message: "Missing intentId",
+      });
     }
 
-    // 3️⃣ Generate Unique Order ID
-    const merchantOrderId = `mo_${intentId}_${Date.now()}`;
+    const intent = await PaymentIntent.findOne({ intentId });
+    if (!intent) {
+      console.warn("[create-order] intent not found for:", intentId);
+      return res.status(404).json({
+        success: false,
+        message: "Intent not found",
+      });
+    }
+
+    // -------------------------------
+    // Compute or reuse totals
+    // -------------------------------
+    let finalTotals = null;
+
+    if (intent.totals && typeof intent.totals.totalPaise === "number") {
+      finalTotals = {
+        subtotal: intent.totals.subtotal,
+        shippingFee: intent.totals.shippingFee,
+        tax: intent.totals.tax ?? 0,
+        discountAmount: intent.totals.discountAmount ?? 0,
+        total: intent.totals.total,
+        totalPaise: intent.totals.totalPaise,
+      };
+    } else {
+
+      const dbComputed = await computeTotalsFromDb(intent.orderItems);
+
+      let { subtotal, shippingFee, tax } = dbComputed;
+      let discountAmount = 0;
+      const couponToApply = frontendCouponCode || intent.couponCode || null;
+
+      if (couponToApply) {
+        const coupon = COUPON_RULES.find(
+          (c) => c.code.toUpperCase() === couponToApply.toUpperCase()
+        );
+
+        if (coupon && coupon.isActive) {
+          const notExpired = new Date(coupon.expiryDate) >= new Date();
+          const meetsMinValue = subtotal >= (coupon.minOrderValue || 0);
+
+          if (notExpired && meetsMinValue) {
+            if (coupon.type === "percent") {
+              discountAmount = Math.floor((subtotal * coupon.value) / 100);
+            } else if (coupon.type === "flat") {
+              discountAmount = coupon.value;
+            }
+          }
+        }
+      }
+
+      discountAmount = Math.min(discountAmount, subtotal);
+      const finalTotal = Number(
+        (subtotal + shippingFee - discountAmount).toFixed(2)
+      );
+      const totalPaise = Math.round(finalTotal * 100);
+
+      finalTotals = {
+        subtotal,
+        shippingFee,
+        tax,
+        discountAmount,
+        total: finalTotal,
+        totalPaise,
+      };
+
+      // Persist new totals
+      intent.totals = {
+        subtotal: finalTotals.subtotal,
+        shippingFee: finalTotals.shippingFee,
+        tax: finalTotals.tax,
+        discountAmount: finalTotals.discountAmount,
+        total: finalTotals.total,
+        totalPaise: finalTotals.totalPaise,
+      };
+
+      await intent.save().catch((e) =>
+        console.warn("[create-order] failed to save intent.totals:", e)
+      );
+    }
+
+    // -------------------------------
+    // Create merchantOrderId
+    // -------------------------------
+    const merchantOrderId = `mo_${intent.intentId}_${Date.now()}`;
     intent.merchantOrderId = merchantOrderId;
-    await intent.save();
 
-    // 4️⃣ Get OAuth Token (Latest V2 Flow Requirement)
-    const accessToken = await getAuthToken();
+    try {
+      await intent.save();
+    } catch (e) {
+      console.error("[create-order] failed to save merchantOrderId:", e);
+      return res.status(500).json({
+        success: false,
+        message: "Server error saving order id",
+      });
+    }
 
-   const PHONEPE_MERCHANT_ID = (process.env.PHONEPE_MERCHANT_ID ||process.env.PHONEPE_CLIENT_ID || '').trim();
+    const amountPaiseToSend = finalTotals.totalPaise;
 
-    // 5️⃣ Prepare V2 Payload
+    // -------------------------------
+    // Build PhonePe payload
+    // -------------------------------
+    const PHONEPE_MERCHANT_ID = (
+      process.env.PHONEPE_MERCHANT_ID ||
+      process.env.PHONEPE_CLIENT_ID ||
+      ""
+    ).trim();
+
     const payload = {
-  merchantOrderId: merchantOrderId,
-  amount: computed.totalPaise,
-  merchantId: PHONEPE_MERCHANT_ID,
-  paymentInstrument: { type: "PAY_PAGE" },
-  deviceContext: { deviceOS: "WEB" },
-  redirectUrl: `${process.env.CLIENT_URL}/payment-status?txn=${merchantOrderId}`,
-  callbackUrl: `${process.env.API_URL}/api/payments/phonepe/webhook`,
-  mobileNumber: intent.customerInfo?.phone || undefined,
-  metaInfo: intent.metaInfo || {}
+      merchantOrderId,
+      amount: amountPaiseToSend,
+      paymentInstrument: { type: "PAY_PAGE" },
+      paymentFlow: {
+        type: "PG_CHECKOUT",
+        merchantUrls: {
+          redirectUrl: `${process.env.CLIENT_URL}/payment-status?txn=${merchantOrderId}`,
+        },
+      },
+      callbackUrl: `${process.env.API_URL}/api/payments/phonepe/webhook`,
+      mobileNumber: intent.customerInfo?.phone || undefined,
+      metaInfo: intent.metaInfo || {},
     };
 
-    // 6️⃣ Send Payment Request
+    const accessToken = await getAuthToken();
     const PAY_URL = PHONEPE_CONFIG[PHONEPE_ENV].payUrl;
 
     const response = await axios.post(PAY_URL, payload, {
       headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `O-Bearer ${accessToken}` // ⚠️ "O-Bearer" prefix required by PhonePe v2
-      }
+        "Content-Type": "application/json",
+        Authorization: `O-Bearer ${accessToken}`,
+      },
+      timeout: 20000,
     });
 
-    // 7️⃣ Handle Success
-    if (response.data && response.data.data) {
-      // V2 shape: response.data.data.instrumentResponse.redirectInfo.url
-      const redirectInfo = response.data.data.instrumentResponse?.redirectInfo;
-      const redirectUrl = redirectInfo?.url || response.data.data.redirectUrl || null;
+    // -------------------------------
+    // Parse PhonePe response
+    // -------------------------------
+    const resp = response.data || {};
+    const phonepeData = resp.data || resp;
 
-      // Update DB intent attempt
-      intent.attempts = intent.attempts || [];
-      intent.attempts.push({
-        attemptId: `att_${nanoid(8)}`,
-        createdAt: new Date(),
-        status: "initiated",
-        gatewayResponse: safeJson(response.data),
-        amountPaise: computed.totalPaise,
-      });
-      intent.status = "initiated";
-      intent.save().catch(e => console.warn("failed to save intent after create-order", e));
+    const redirectFromGateway =
+      phonepeData?.instrumentResponse?.redirectInfo?.url ||
+      phonepeData?.redirectUrl ||
+      resp?.redirectUrl ||
+      null;
 
-      return res.json({
-        success: true,
-        merchantOrderId,
-        redirectUrl
-      });
-    } else {
-      console.error("Unexpected PhonePe create-order response:", safeJson(response.data));
-      throw new Error("Invalid response from PhonePe");
+    const vpaFromGateway =
+      phonepeData?.instrumentResponse?.vpa ||
+      phonepeData?.vpa ||
+      phonepeData?.upi ||
+      phonepeData?.merchantVPA ||
+      null;
+
+    // -------------------------------
+    // Construct fallback upi://pay link
+    // -------------------------------
+    let upiLink = null;
+
+    if (vpaFromGateway) {
+      upiLink =
+        "upi://pay" +
+        `?pa=${encodeURIComponent(vpaFromGateway)}` +
+        `&pn=${encodeURIComponent(
+          intent.customerInfo?.fullName || "Roots & Richness"
+        )}` +
+        `&am=${encodeURIComponent(finalTotals.total.toFixed(2))}` +
+        `&cu=INR` +
+        `&tid=${encodeURIComponent(merchantOrderId)}`;
     }
 
+    let finalRedirect = redirectFromGateway || upiLink || null;
+
+    // -------------------------------
+    // Preferred UPI app → intent:// link
+    // -------------------------------
+    const preferredApp = (req.body.preferredApp || "")
+      .toString()
+      .toLowerCase();
+
+    if (preferredApp && !redirectFromGateway && upiLink) {
+      const packageMap = {
+        gpay: "com.google.android.apps.nbu.paisa.user",
+        phonepe: "com.phonepe.app",
+        paytm: "net.one97.paytm",
+        bhim: "in.org.npci.upiapp",
+      };
+
+      const pkg = packageMap[preferredApp];
+
+      if (pkg) {
+        const urlPart = upiLink.replace(/^upi:\/\//, "");
+        const intentUri = `intent://${urlPart}#Intent;package=${pkg};scheme=upi;end`;
+
+        finalRedirect = intentUri;
+      }
+    }
+
+    // -------------------------------
+    // Save attempt
+    // -------------------------------
+    intent.attempts = intent.attempts || [];
+    intent.attempts.push({
+      attemptId: `att_${nanoid(8)}`,
+      createdAt: new Date(),
+      status: "initiated",
+      gatewayResponse: safeJson(resp),
+      amountPaise: finalTotals.totalPaise,
+      phonepeOrderId: phonepeData?.orderId || resp?.orderId || null,
+    });
+
+    intent.status = "initiated";
+
+    await intent.save().catch((e) => {
+      console.warn("[create-order] failed to save attempt:", e);
+    });
+
+    // -------------------------------
+    // Final response
+    // -------------------------------
+    return res.json({
+      success: true,
+      merchantOrderId,
+      redirectUrl: finalRedirect,
+      upiLink: upiLink || null,
+      vpa: vpaFromGateway || null,
+      phonepeRaw: resp,
+    });
   } catch (err) {
-    console.error("PhonePe create-order Error:", err.response?.data || err.message || err);
+    console.error(
+      "[create-order] Error:",
+      err?.response?.data || err?.message || err
+    );
+
     return res.status(500).json({
       success: false,
       message: "Payment initiation failed",
-      error: err.response?.data || err.message || 'unknown'
+      error: err?.response?.data || err?.message || "unknown",
     });
   }
 });
-
 /* ---------------------------
    Initiate intent (create PaymentIntent record)
    - public (optionalAuth supports guest users)
@@ -304,44 +477,114 @@ router.post("/phonepe/create-order", async (req, res) => {
    --------------------------- */
 router.post('/phonepe/initiate-intent', createIntentLimiter, optionalAuth, async (req, res) => {
   try {
-    const { orderItems, customerInfo, shippingAddress, couponCode } = req.body;
-
+    const { orderItems, customerInfo = {}, shippingAddress: incomingShipping = {}, couponCode } = req.body;
+// debug: quick preview of incoming body (non-sensitive)
+    // Basic validation
     const v = validateOrderItemsShape(orderItems);
-    if (v) return res.status(400).json({ success: false, message: v });
-
-    if (!customerInfo?.email || !customerInfo?.fullName) {
-      return res.status(400).json({ success: false, message: "Missing customerInfo" });
+    if (v) {
+      console.warn('[initiate-intent] validation failed:', v);
+      return res.status(400).json({ success: false, message: v });
     }
 
-    const computed = await computeTotalsFromDb(orderItems);
+    // customerInfo minimal check
+    if (!customerInfo?.email || !customerInfo?.firstName) {
+      console.warn('[initiate-intent] missing customerInfo:', customerInfo);
+      return res.status(400).json({ success: false, message: "Missing customerInfo (firstName, email required)" });
+    }
 
+    // Build finalShippingAddress by preferring explicit shippingAddress, else fallback to customerInfo
+    const finalShippingAddress = {
+      fullName: (incomingShipping.fullName || customerInfo.fullName || `${(customerInfo.firstName || '')} ${(customerInfo.lastName || '')}`).trim(),
+      email: (incomingShipping.email || customerInfo.email || '').trim(),
+      phone: (incomingShipping.phone || customerInfo.phone || customerInfo.mobileNumber || '').toString().trim(),
+      address: (incomingShipping.address || incomingShipping.addressLine1 || customerInfo.address || '').trim(),
+      addressLine2: (incomingShipping.addressLine2 || '').trim(),
+      city: (incomingShipping.city || customerInfo.city || '').trim(),
+      state: (incomingShipping.state || customerInfo.state || '').trim(),
+      postalCode: (incomingShipping.postalCode || incomingShipping.postal || customerInfo.pincode || customerInfo.postalCode || '').toString().trim(),
+      country: (incomingShipping.country || customerInfo.country || 'India').trim()
+    };
+
+// Strict validation: reject if any required shipping field is missing OR is an empty string
+const required = ['address', 'city', 'state', 'postalCode', 'phone'];
+const missing = required.filter(f => !finalShippingAddress[f] || finalShippingAddress[f].trim().length === 0);
+
+if (missing.length > 0) {
+  console.warn('[initiate-intent] missing/empty required shipping fields:', missing, 'finalShippingAddress:', finalShippingAddress);
+  return res.status(400).json({
+    success: false,
+    message: `Missing required shipping fields: ${missing.join(', ')}`,
+    missing,
+    shippingPreview: finalShippingAddress // helpful for frontend debugging
+  });
+}
+
+    // 1) Compute base totals
+    const dbComputed = await computeTotalsFromDb(orderItems);
+    let { subtotal, shippingFee, tax } = dbComputed;
+
+    // 2) Apply coupon (existing logic)
+    let discountAmount = 0;
+    const couponToApply = couponCode || null;
+
+    if (couponToApply) {
+      const coupon = COUPON_RULES.find(c => c.code.toUpperCase() === couponToApply.toUpperCase());
+      if (coupon && coupon.isActive) {
+        const notExpired = new Date(coupon.expiryDate) >= new Date();
+        const meetsMinValue = subtotal >= (coupon.minOrderValue || 0);
+        if (notExpired && meetsMinValue) {
+          if (coupon.type === "percent") {
+            discountAmount = Math.floor((subtotal * coupon.value) / 100);
+          } else if (coupon.type === "flat") {
+            discountAmount = coupon.value;
+          }
+        }
+      }
+    }
+
+    discountAmount = Math.min(discountAmount, subtotal);
+    const finalTotal = Number((subtotal + shippingFee - discountAmount).toFixed(2));
+    const totalPaise = Math.round(finalTotal * 100);
+
+    if (totalPaise <= 0) {
+      return res.status(400).json({ success: false, message: "Invalid payable amount after discount" });
+    }
+
+    // Persist intent — importantly we include the validated finalShippingAddress
     const intent = new PaymentIntent({
       intentId: `pi_${nanoid(12)}`,
       merchantOrderId: null,
       user: req.user?.id || null,
       orderItems,
       customerInfo,
-      shippingAddress: shippingAddress || {},
+      shippingAddress: finalShippingAddress,
       totals: {
-        ...computed,
-        totalPaise: computed.totalPaise,
+        subtotal,
+        shippingFee,
+        tax,
+        discountAmount,
+        total: finalTotal,
+        totalPaise
       },
       status: "pending",
       attempts: [],
       couponCode: couponCode || null,
-      createdAt: new Date(),
+      createdAt: new Date()
     });
 
     await intent.save();
-
-    return res.json({ success: true, intentId: intent.intentId });
+    return res.json({
+      success: true,
+      intentId: intent.intentId,
+      totals: intent.totals,
+      shippingAddress: finalShippingAddress // helpful for frontend debug/verification
+    });
 
   } catch (err) {
-    console.error("initiate-intent error:", err);
-    return res.status(500).json({ success: false, message: "Failed to create intent" });
+    console.error('[initiate-intent] unexpected error:', err);
+    return res.status(500).json({ success: false, message: "Failed to create intent", error: err?.message || 'unknown' });
   }
 });
-
 /* ---------------------------
    PhonePe webhook handler (exported)
    - Use express.raw() when mounting (so we can verify header)
@@ -447,8 +690,11 @@ export async function webhookHandler(req, res) {
             }
           } else if (product.stock != null) {
             product.stock = Math.max(0, (product.stock || 0) - item.quantity);
+            intent.stockAdjusted = true;
+            await intent.save().catch(e => console.warn('webhook: failed to set stockAdjusted', e));
           }
           await product.save();
+
         }
       }
 
@@ -564,96 +810,182 @@ router.post("/phonepe/callback", express.json(), async (req, res) => {
    - body: { merchantOrderId }
    - Idempotent: only creates Order if not already created
    --------------------------- */
+// POST /api/payments/phonepe/check-status
 router.post('/phonepe/check-status', async (req, res) => {
   try {
-    const { merchantOrderId } = req.body;
-    if (!merchantOrderId) return res.status(400).json({ success: false, message: 'Missing merchantOrderId' });
+    let { merchantOrderId, intentId } = req.body;
 
-    // Find existing intent
-    const intent = await PaymentIntent.findOne({ merchantOrderId });
-    if (!intent) return res.status(404).json({ success: false, message: 'Intent not found' });
+    if (!merchantOrderId && !intentId) {
+      return res.status(400).json({ success: false, message: 'Missing merchantOrderId or intentId' });
+    }
 
-    // Call PhonePe status API
+    // Lookup intent
+    let intent;
+    if (merchantOrderId) {
+      intent = await PaymentIntent.findOne({ merchantOrderId });
+    } else if (intentId) {
+      intent = await PaymentIntent.findOne({ intentId });
+      if (intent && intent.merchantOrderId) {
+        merchantOrderId = intent.merchantOrderId;
+      } else if (intent && !intent.merchantOrderId) {
+        try {
+          merchantOrderId = (typeof makeMerchantOrderId === 'function') ? makeMerchantOrderId() : `mo_${intent.intentId}_${Date.now()}`;
+          intent.merchantOrderId = merchantOrderId;
+          intent.backfilled = true;
+          intent.backfilledAt = new Date();
+          intent.backfillNote = 'on-the-fly backfill from check-status';
+          await intent.save().catch(e => console.warn('[check-status] write backfilled merchantOrderId failed:', e));
+        } catch (e) {
+          console.warn('[check-status] backfill failed', e);
+        }
+      }
+    }
+
+    if (!intent) {
+      console.warn('[check-status] Intent not found:', merchantOrderId || intentId);
+      return res.status(404).json({ success: false, message: 'Intent not found' });
+    }
+
+    // Fast-path: if intent already marked paid, try to return any existing order
+    if (intent.status === 'paid') {
+      const existingOrder = await Order.findOne({
+        $or: [
+          { orderId: intent.merchantOrderId },
+          { merchantOrderId: intent.merchantOrderId },
+          { orderId: merchantOrderId },
+          { merchantOrderId: merchantOrderId }
+        ]
+      }).lean();
+      if (existingOrder) {
+        return res.json({ success: true, status: 'COMPLETED', order: existingOrder });
+      }
+    }
+
+    // Ensure merchantOrderId present for PhonePe call
+    merchantOrderId = merchantOrderId || intent.merchantOrderId;
+    if (!merchantOrderId) {
+      return res.status(400).json({ success: false, message: 'merchantOrderId missing after lookup' });
+    }
+
+    // PhonePe status call
     const accessToken = await getAuthToken();
+    if (!accessToken) {
+      console.error('[check-status] missing PhonePe access token');
+      return res.status(500).json({ success: false, message: 'Payment provider token error' });
+    }
+
     const statusUrlBase = PHONEPE_CONFIG[PHONEPE_ENV].orderStatusUrlBase;
     const statusUrl = `${statusUrlBase}/${encodeURIComponent(merchantOrderId)}/status`;
 
-    const statusResp = await axios.get(statusUrl, {
-      headers: { Authorization: `O-Bearer ${accessToken}` },
-      timeout: 8000
-    });
+    let statusResp;
+    try {
+      statusResp = await axios.get(statusUrl, {
+        headers: { Authorization: `O-Bearer ${accessToken}` },
+        timeout: 10000
+      });
+    } catch (err) {
+      console.error('[check-status] PhonePe status API error:', err?.response?.data || err?.message || err);
+      return res.status(502).json({ success: false, message: 'Payment provider status check failed', error: err?.message || 'unknown' });
+    }
 
-    // Defensive checks
-    if (!statusResp.data) {
+    if (!statusResp?.data) {
+      console.warn('[check-status] Empty response from PhonePe', statusResp);
       return res.status(200).json({ success: false, message: 'Empty response from PhonePe' });
     }
 
-    // PhonePe response shape: { success:true, data: { state: 'COMPLETED', ... } }
-    const successFlag = statusResp.data.success === true || statusResp.data.status === 'SUCCESS';
-    const state = (statusResp.data.data?.state || statusResp.data.data?.status || '').toUpperCase();
+    const body = statusResp.data;
 
-    // Save gateway response for debugging
-    intent.gatewayResponse = safeJson(statusResp.data);
-    await intent.save().catch(e => console.warn("Intent save warning:", e));
+    // Normalize state & tx
+    const stateRaw = (
+      body?.data?.state ||
+      body?.data?.status ||
+      body?.state ||
+      body?.status ||
+      ''
+    ).toString();
+    const state = stateRaw.toUpperCase();
 
-    if (state === 'COMPLETED') {
-      // Idempotent creation of Order
+    const transactionId =
+      body?.data?.transactionId ||
+      body?.data?.paymentDetails?.[0]?.transactionId ||
+      body?.data?.payment_details?.[0]?.transactionId ||
+      body?.paymentDetails?.[0]?.transactionId ||
+      body?.payment_details?.[0]?.transactionId ||
+      body?.transactionId ||
+      body?.data?.transaction_id ||
+      body?.transaction_id ||
+      undefined;
+
+    // persist gateway response and ids
+    intent.gatewayResponse = safeJson(body);
+    intent.gatewayOrderId = body?.orderId || body?.data?.orderId || null;
+    intent.gatewayTransactionId = transactionId || null;
+    await intent.save().catch(e => console.warn('[check-status] intent.save() warning:', e));
+
+    // COMPLETED path
+    if (state === 'COMPLETED' || state === 'SUCCESS') {
+      // mark intent paid
       intent.status = 'paid';
       intent.paidAt = new Date();
-      await intent.save().catch(e => console.warn("Intent save warning:", e));
+      await intent.save().catch(e => console.warn('[check-status] save intent paid warning:', e));
 
-      const existingOrder = await Order.findOne({ orderId: merchantOrderId });
-      if (!existingOrder) {
-        const order = new Order({
-          orderId: merchantOrderId,
-          orderItems: intent.orderItems,
-          customerInfo: intent.customerInfo,
-          shippingAddress: intent.shippingAddress,
-          subtotal: intent.totals.subtotal,
-          tax: intent.totals.tax,
-          discountAmount: intent.totals.discountAmount || 0,
-          shippingFee: intent.totals.shippingFee || 0,
-          total: intent.totals.total,
-          paymentProvider: "phonepe",
-          paymentStatus: "paid",
-          intentId: intent.intentId,
-          paymentId: statusResp.data.data?.transactionId || undefined,
-        });
-        await order.save();
+      // create/update order via service (idempotent)
+      let order = null;
+      try {
+        const paymentMeta = {
+          method: 'phonepe',
+          provider: 'phonepe',
+          paymentId: intent.gatewayTransactionId || transactionId || body?.paymentDetails?.[0]?.transactionId || null,
+          gatewayOrderId: intent.gatewayOrderId || body?.orderId || null
+        };
 
-        // Reduce stock (idempotent-ish; adjust to your models)
-        for (let item of intent.orderItems) {
-          const prodId = item.productId || item.product || item._id;
-          const product = await Product.findById(prodId);
-          if (!product) continue;
-          if (item.variantId) {
-            const variant = product.variants.id(item.variantId);
-            if (variant) {
-              variant.stock = Math.max(0, (variant.stock || 0) - item.quantity);
-            }
-          } else if (product.stock != null) {
-            product.stock = Math.max(0, (product.stock || 0) - item.quantity);
-          }
-          await product.save().catch(e => console.warn("Stock update warning:", e));
+        // IMPORTANT: ensure intent.shippingAddress exists and has real values (see initiate-intent above)
+        if (!intent.shippingAddress || !intent.shippingAddress.address || !intent.shippingAddress.city || !intent.shippingAddress.state || !intent.shippingAddress.postalCode) {
+          console.error('[check-status] missing shippingAddress on intent; cannot create order for shipping:', intent.intentId);
+          intent.reconciliationRequired = true;
+          intent.reconciliationNote = 'missing shippingAddress on intent — cannot auto-create order';
+          await intent.save().catch(e => console.warn('[check-status] saving reconciliation flag failed:', e));
+          return res.json({ success: true, status: 'COMPLETED', order: null, warning: 'missing shippingAddress on intent' });
         }
+
+        const createdOrder = await createOrderFromIntent({
+          merchantOrderId,
+          intent,
+          paymentMeta
+        });
+
+        // mark stockAdjusted true if service performed stock adjustments
+        intent.stockAdjusted = true;
+        await intent.save().catch(e => console.warn('[check-status] save intent stockAdjusted warning:', e));
+
+        order = await Order.findById(createdOrder._id).lean();
+      } catch (err) {
+        console.error('[check-status] createOrderFromIntent failed:', err);
+        intent.reconciliationRequired = true;
+        intent.reconciliationNote = `order.create failed: ${err?.message || err}`;
+        await intent.save().catch(e => console.warn('[check-status] saving reconciliation flag failed:', e));
       }
 
-      return res.json({ success: true, status: 'COMPLETED' });
+      const freshOrder = order ? await Order.findById(order._id).lean() : null;
+      return res.json({ success: true, status: 'COMPLETED', order: freshOrder });
     }
 
-    // Non-completed (PENDING, FAILED, EXPIRED)
-    if (state === 'FAILED' || state === 'EXPIRED') {
+    // FAILED/EXPIRED/CANCELLED
+    if (state === 'FAILED' || state === 'EXPIRED' || state === 'CANCELLED') {
       intent.status = 'failed';
-      await intent.save().catch(e => console.warn("Intent save warning:", e));
+      await intent.save().catch(e => console.warn('[check-status] save intent failed warning:', e));
+      return res.json({ success: true, status: state, raw: body });
     }
 
-    return res.json({ success: true, status: state || 'UNKNOWN', raw: statusResp.data });
+    // PENDING
+    console.info('[check-status] responding to frontend with:', { status: state });
+    return res.json({ success: true, status: 'PENDING', raw: body });
+
   } catch (err) {
-    console.error('phonepe/check-status error:', err?.response?.data || err?.message || err);
+    console.error('[check-status] unexpected error:', err?.response?.data || err?.message || err);
     return res.status(500).json({ success: false, message: 'Status check failed', error: err?.message || 'unknown' });
   }
 });
-
 /* ---------------------------
    Stripe: Create payment intent (server-side) - requires auth
    - verifies order exists and belongs to user
@@ -810,7 +1142,7 @@ router.post("/razorpay/create-order", createIntentLimiter, optionalAuth, async (
         tax,
         total: finalTotal
       },
-      status: "pending",
+      status: "paid",
       user: req.user ? req.user._id : null
     });
 
