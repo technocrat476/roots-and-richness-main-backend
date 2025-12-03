@@ -30,7 +30,7 @@ import axios from "axios";
 
 const router = express.Router();
 router.use(express.json());
-
+console.info('[routes/payments] loading payments router (file: payments.routes.js?) pid=%s', process.pid);
 // Initialize SDKs (do NOT log secrets)
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -220,31 +220,25 @@ async function getAuthToken() {
    - requires a PaymentIntent created previously (initiate-intent)
    --------------------------- */
 // POST /api/payments/phonepe/create-order
+// POST /phonepe/create-order
 router.post("/phonepe/create-order", async (req, res) => {
   try {
-    const { intentId, couponCode: frontendCouponCode } = req.body;
+    const { intentId, couponCode: frontendCouponCode, preferredApp = null, previewOnly = false } = req.body;
 
     if (!intentId) {
-      return res.status(400).json({
-        success: false,
-        message: "Missing intentId",
-      });
+      return res.status(400).json({ success: false, message: "Missing intentId" });
     }
 
     const intent = await PaymentIntent.findOne({ intentId });
     if (!intent) {
       console.warn("[create-order] intent not found for:", intentId);
-      return res.status(404).json({
-        success: false,
-        message: "Intent not found",
-      });
+      return res.status(404).json({ success: false, message: "Intent not found" });
     }
 
     // -------------------------------
     // Compute or reuse totals
     // -------------------------------
     let finalTotals = null;
-
     if (intent.totals && typeof intent.totals.totalPaise === "number") {
       finalTotals = {
         subtotal: intent.totals.subtotal,
@@ -255,48 +249,30 @@ router.post("/phonepe/create-order", async (req, res) => {
         totalPaise: intent.totals.totalPaise,
       };
     } else {
-
       const dbComputed = await computeTotalsFromDb(intent.orderItems);
-
       let { subtotal, shippingFee, tax } = dbComputed;
       let discountAmount = 0;
       const couponToApply = frontendCouponCode || intent.couponCode || null;
 
       if (couponToApply) {
-        const coupon = COUPON_RULES.find(
-          (c) => c.code.toUpperCase() === couponToApply.toUpperCase()
-        );
-
+        const coupon = COUPON_RULES.find((c) => c.code.toUpperCase() === couponToApply.toUpperCase());
         if (coupon && coupon.isActive) {
           const notExpired = new Date(coupon.expiryDate) >= new Date();
           const meetsMinValue = subtotal >= (coupon.minOrderValue || 0);
-
           if (notExpired && meetsMinValue) {
-            if (coupon.type === "percent") {
-              discountAmount = Math.floor((subtotal * coupon.value) / 100);
-            } else if (coupon.type === "flat") {
-              discountAmount = coupon.value;
-            }
+            if (coupon.type === "percent") discountAmount = Math.floor((subtotal * coupon.value) / 100);
+            else if (coupon.type === "flat") discountAmount = coupon.value;
           }
         }
       }
 
       discountAmount = Math.min(discountAmount, subtotal);
-      const finalTotal = Number(
-        (subtotal + shippingFee - discountAmount).toFixed(2)
-      );
+      const finalTotal = Number((subtotal + shippingFee - discountAmount).toFixed(2));
       const totalPaise = Math.round(finalTotal * 100);
 
-      finalTotals = {
-        subtotal,
-        shippingFee,
-        tax,
-        discountAmount,
-        total: finalTotal,
-        totalPaise,
-      };
+      finalTotals = { subtotal, shippingFee, tax, discountAmount, total: finalTotal, totalPaise };
 
-      // Persist new totals
+      // persist
       intent.totals = {
         subtotal: finalTotals.subtotal,
         shippingFee: finalTotals.shippingFee,
@@ -305,10 +281,7 @@ router.post("/phonepe/create-order", async (req, res) => {
         total: finalTotals.total,
         totalPaise: finalTotals.totalPaise,
       };
-
-      await intent.save().catch((e) =>
-        console.warn("[create-order] failed to save intent.totals:", e)
-      );
+      await intent.save().catch((e) => console.warn("[create-order] failed to save intent.totals:", e));
     }
 
     // -------------------------------
@@ -316,28 +289,86 @@ router.post("/phonepe/create-order", async (req, res) => {
     // -------------------------------
     const merchantOrderId = `mo_${intent.intentId}_${Date.now()}`;
     intent.merchantOrderId = merchantOrderId;
-
     try {
       await intent.save();
     } catch (e) {
       console.error("[create-order] failed to save merchantOrderId:", e);
-      return res.status(500).json({
-        success: false,
-        message: "Server error saving order id",
-      });
+      return res.status(500).json({ success: false, message: "Server error saving order id" });
     }
 
     const amountPaiseToSend = finalTotals.totalPaise;
 
-    // -------------------------------
-    // Build PhonePe payload
-    // -------------------------------
-    const PHONEPE_MERCHANT_ID = (
-      process.env.PHONEPE_MERCHANT_ID ||
-      process.env.PHONEPE_CLIENT_ID ||
-      ""
-    ).trim();
+    // Helper: sources of merchant VPA
+    const vpaCandidates = [
+      intent.vpa || null,
+      intent.merchantVPA || null,
+      intent.merchantVpa || null,
+      process.env.MERCHANT_VPA || null,
+    ].filter(Boolean);
+    const availableVpa = vpaCandidates.length ? vpaCandidates[0] : null;
 
+    // Build a canonical upi://pay link if we have a VPA
+    const buildUpiLink = (vpa) => {
+      if (!vpa) return null;
+      return (
+        "upi://pay" +
+        `?pa=${encodeURIComponent(vpa)}` +
+        `&pn=${encodeURIComponent(intent.customerInfo?.fullName || "Roots & Richness")}` +
+        `&am=${encodeURIComponent((finalTotals.total || 0).toFixed(2))}` +
+        `&cu=INR` +
+        `&tid=${encodeURIComponent(merchantOrderId)}`
+      );
+    };
+
+    // If preferredApp is present and is NOT phonepe, prefer returning a direct upi link / intent without calling PhonePe pay-page.
+    const normalizedPreferred = (preferredApp || "").toString().toLowerCase();
+
+    // If the client asked for a specific non-phonepe app and we can build a UPI link locally, return that immediately.
+    if (normalizedPreferred && normalizedPreferred !== "phonepe" && availableVpa) {
+      const upiLink = buildUpiLink(availableVpa);
+
+      // Optionally build Android intent URI to force-open the app package
+      const packageMap = {
+        gpay: "com.google.android.apps.nbu.paisa.user",
+        phonepe: "com.phonepe.app",
+        paytm: "net.one97.paytm",
+        bhim: "in.org.npci.upiapp",
+      };
+      const pkg = packageMap[normalizedPreferred] || null;
+      let intentUri = null;
+      if (pkg && upiLink) {
+        const urlPart = upiLink.replace(/^upi:\/\//, "");
+        intentUri = `intent://${urlPart}#Intent;package=${pkg};scheme=upi;end`;
+      }
+
+      // Save attempt record (no external gateway call)
+      intent.attempts = intent.attempts || [];
+      intent.attempts.push({
+        attemptId: `att_${nanoid(8)}`,
+        createdAt: new Date(),
+        status: "initiated",
+        gatewayResponse: safeJson({ source: "local_upi_link", vpa: availableVpa }),
+        amountPaise: finalTotals.totalPaise,
+        phonepeOrderId: null,
+      });
+      intent.status = "initiated";
+      await intent.save().catch((e) => console.warn("[create-order] failed to save attempt (local upi):", e));
+
+      return res.json({
+        success: true,
+        merchantOrderId,
+        redirectUrl: intentUri || upiLink, // prefer intent URI for Android if available
+        upiLink: upiLink,
+        vpa: availableVpa,
+        phonepeRaw: { source: "local_upi_link" },
+      });
+    }
+
+    // Otherwise (no preferred app or preferredApp === 'phonepe' or no VPA available), fall back to original PhonePe / PAY_PAGE flow.
+    // -------------------------------
+    // Build PhonePe payload (as before)
+    // -------------------------------
+    const PHONEPE_MERCHANT_ID = (process.env.PHONEPE_MERCHANT_ID || process.env.PHONEPE_CLIENT_ID || "").trim();
     const payload = {
       merchantOrderId,
       amount: amountPaiseToSend,
@@ -357,16 +388,11 @@ router.post("/phonepe/create-order", async (req, res) => {
     const PAY_URL = PHONEPE_CONFIG[PHONEPE_ENV].payUrl;
 
     const response = await axios.post(PAY_URL, payload, {
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `O-Bearer ${accessToken}`,
-      },
+      headers: { "Content-Type": "application/json", Authorization: `O-Bearer ${accessToken}` },
       timeout: 20000,
     });
 
-    // -------------------------------
     // Parse PhonePe response
-    // -------------------------------
     const resp = response.data || {};
     const phonepeData = resp.data || resp;
 
@@ -383,53 +409,26 @@ router.post("/phonepe/create-order", async (req, res) => {
       phonepeData?.merchantVPA ||
       null;
 
-    // -------------------------------
-    // Construct fallback upi://pay link
-    // -------------------------------
+    // Build fallback UPI link when PhonePe returns vpa
     let upiLink = null;
-
     if (vpaFromGateway) {
-      upiLink =
-        "upi://pay" +
-        `?pa=${encodeURIComponent(vpaFromGateway)}` +
-        `&pn=${encodeURIComponent(
-          intent.customerInfo?.fullName || "Roots & Richness"
-        )}` +
-        `&am=${encodeURIComponent(finalTotals.total.toFixed(2))}` +
-        `&cu=INR` +
-        `&tid=${encodeURIComponent(merchantOrderId)}`;
+      upiLink = buildUpiLink(vpaFromGateway);
+    } else if (availableVpa) {
+      // fallback to merchant vpa we had earlier
+      upiLink = buildUpiLink(availableVpa);
     }
 
+    // Final redirect preference: redirectFromGateway (PhonePe pay page) first, else upiLink
     let finalRedirect = redirectFromGateway || upiLink || null;
 
-    // -------------------------------
-    // Preferred UPI app → intent:// link
-    // -------------------------------
-    const preferredApp = (req.body.preferredApp || "")
-      .toString()
-      .toLowerCase();
-
-    if (preferredApp && !redirectFromGateway && upiLink) {
-      const packageMap = {
-        gpay: "com.google.android.apps.nbu.paisa.user",
-        phonepe: "com.phonepe.app",
-        paytm: "net.one97.paytm",
-        bhim: "in.org.npci.upiapp",
-      };
-
-      const pkg = packageMap[preferredApp];
-
-      if (pkg) {
-        const urlPart = upiLink.replace(/^upi:\/\//, "");
-        const intentUri = `intent://${urlPart}#Intent;package=${pkg};scheme=upi;end`;
-
-        finalRedirect = intentUri;
-      }
+    // If preferredApp requested phonepe specifically and we have upiLink but not redirectFromGateway, we can generate an intent URI
+    if (normalizedPreferred === "phonepe" && upiLink) {
+      const pkg = "com.phonepe.app";
+      const urlPart = upiLink.replace(/^upi:\/\//, "");
+      finalRedirect = `intent://${urlPart}#Intent;package=${pkg};scheme=upi;end`;
     }
 
-    // -------------------------------
     // Save attempt
-    // -------------------------------
     intent.attempts = intent.attempts || [];
     intent.attempts.push({
       attemptId: `att_${nanoid(8)}`,
@@ -439,30 +438,23 @@ router.post("/phonepe/create-order", async (req, res) => {
       amountPaise: finalTotals.totalPaise,
       phonepeOrderId: phonepeData?.orderId || resp?.orderId || null,
     });
-
     intent.status = "initiated";
 
     await intent.save().catch((e) => {
       console.warn("[create-order] failed to save attempt:", e);
     });
 
-    // -------------------------------
-    // Final response
-    // -------------------------------
+    // Return everything frontend needs
     return res.json({
       success: true,
       merchantOrderId,
       redirectUrl: finalRedirect,
       upiLink: upiLink || null,
-      vpa: vpaFromGateway || null,
+      vpa: vpaFromGateway || availableVpa || null,
       phonepeRaw: resp,
     });
   } catch (err) {
-    console.error(
-      "[create-order] Error:",
-      err?.response?.data || err?.message || err
-    );
-
+    console.error("[create-order] Error:", err?.response?.data || err?.message || err);
     return res.status(500).json({
       success: false,
       message: "Payment initiation failed",
@@ -585,6 +577,7 @@ if (missing.length > 0) {
     return res.status(500).json({ success: false, message: "Failed to create intent", error: err?.message || 'unknown' });
   }
 });
+
 /* ---------------------------
    PhonePe webhook handler (exported)
    - Use express.raw() when mounting (so we can verify header)
@@ -986,6 +979,39 @@ router.post('/phonepe/check-status', async (req, res) => {
     return res.status(500).json({ success: false, message: 'Status check failed', error: err?.message || 'unknown' });
   }
 });
+// POST /api/payments/phonepe/events
+// Purpose: proxy events/batch (or any other PhonePe endpoint) to avoid CORS and keep tokens server-side.
+router.post('/payments/phonepe/events', async (req, res) => {
+  try {
+    // get server-side PhonePe token (your existing helper)
+    const accessToken = await getAuthToken();
+    if (!accessToken) {
+      console.error('[phonepe:proxy] missing access token');
+      return res.status(500).json({ success: false, message: 'PhonePe auth failed' });
+    }
+
+    // PhonePe preprod endpoint - keep in env in production
+    const PHONEPE_EVENTS_URL = process.env.PHONEPE_EVENTS_URL || 'https://api-preprod.phonepe.com/apis/pg-meta/client/v1/events/batch';
+
+    // Forward request to PhonePe server-to-server
+    const response = await axios.post(PHONEPE_EVENTS_URL, req.body, {
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `O-Bearer ${accessToken}`
+        // add other headers if PhonePe docs require them
+      },
+      timeout: 15000
+    });
+
+    // Relay PhonePe response back to the browser (status preserved)
+    return res.status(response.status).json(response.data);
+  } catch (err) {
+    console.error('[phonepe:proxy] error forwarding events:', err?.response?.data || err?.message || err);
+    const status = err?.response?.status || 502;
+    const body = err?.response?.data || { success: false, message: err?.message || 'Upstream error' };
+    return res.status(status).json(body);
+  }
+});
 /* ---------------------------
    Stripe: Create payment intent (server-side) - requires auth
    - verifies order exists and belongs to user
@@ -1295,7 +1321,6 @@ router.post('/check-stock', async (req, res) => {
     return res.status(500).json({ success: false, message: "Server error" });
   }
 });
-
 /* ---------------------------
    Export router (default) and webhookHandler (named)
    --------------------------- */
