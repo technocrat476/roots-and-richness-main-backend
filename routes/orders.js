@@ -208,7 +208,6 @@ const pushResp = await ShippingAPI.pushOrder({
 //  console.error("❌ Pickup scheduling failed:", err.message);
 //}
 try {
-  console.log("📧 Sending email to:", finalShippingAddress.email);
   if (finalShippingAddress.email) {
   await sendOrderConfirmation(createdOrder, {
     name: finalShippingAddress.fullName,
@@ -440,7 +439,6 @@ if (req.query.search) {
 // @access  Private/Admin
 router.put('/:id/status', protect, admin, async (req, res) => {
   try {
-    console.log("Update order called:", req.params.id, req.body);
     const { status } = req.body;
 
     const order = await Order.findById(req.params.id).populate('user', 'name email');
@@ -611,9 +609,9 @@ router.get('/:id/invoice', protect, async (req, res) => {
       company: {
         name: 'Roots and Richness',
         address: 'Indira Nagar, Ballari, Karnataka',
-        gstin: 'Your GSTIN',
+        gstin: '29ELLPD3910E1Z9',
         logoUrl: 'https://ik.imagekit.io/rrcdn/Favicons/android-chrome-512x512.png?updatedAt=1758825398241',
-        email: 'rootsnrichness@gmail.com',
+        email: 'support@rootsandrichness.in',
         phone: '+91-XXXXXXXXXX'
       },
       order: {

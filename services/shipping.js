@@ -7,10 +7,6 @@ const BASE_URL = "https://shipping-api.com/app/api/v1";
 const PUBLIC_KEY = process.env.SHIPPING_PUBLIC_KEY;
 const PRIVATE_KEY = process.env.SHIPPING_PRIVATE_KEY;
 
-console.log("🔑 Shipping Keys:", {
-  PUBLIC_KEY: process.env.SHIPPING_PUBLIC_KEY,
-  PRIVATE_KEY: process.env.SHIPPING_PRIVATE_KEY ? "Loaded" : "Missing"
-});
 
 async function request(endpoint, options = {}) {
   const headers = {
@@ -21,9 +17,9 @@ async function request(endpoint, options = {}) {
   };
 if (options.body) {
     try {
-      console.log("➡️ Body:", JSON.stringify(JSON.parse(options.body), null, 2));
+      //console.log("➡️ Body:", JSON.stringify(JSON.parse(options.body), null, 2));
     } catch (err) {
-      console.log("➡️ Raw Body:", options.body);
+      //console.log("➡️ Raw Body:", options.body);
     }
   }
   const res = await fetch(`${BASE_URL}${endpoint}`, {
