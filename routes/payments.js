@@ -95,52 +95,70 @@ function validateOrderItemsShape(orderItems) {
    - ensures sufficient stock
    - returns { subtotal, shippingFee, total, totalPaise, breakdownItems }
    --------------------------- */
-async function computeTotalsFromDb(orderItems) {
-  let subtotal = 0.0;
+async function computeTotalsFromDb(orderItems = []) {
+  let subtotal = 0;
   const breakdownItems = [];
 
-  // fetch all product ids in single query
-  const productIds = [...new Set(orderItems.map(i => i.productId))];
+  // Use item.product instead of item.productId
+  const productIds = [...new Set(orderItems.map(i => i.product || i.productId))];
   const products = await Product.find({ _id: { $in: productIds } });
 
   const productMap = new Map(products.map(p => [String(p._id), p]));
 
   for (const item of orderItems) {
-    const product = productMap.get(String(item.productId));
-    if (!product) throw new Error(`Product not found: ${item.productId}`);
+    const productId = item.product || item.productId;
+    const product = productMap.get(String(productId));
 
-    // find variant if provided
-    let unitPrice = product.price;
-    let stockAvailable = product.stock ?? 0;
-
-    if (item.variant) {
-      const variant = (product.variants || []).find(v => String(v.size) === String(item.variant) || String(v._id) === String(item.variant));
-      if (!variant) throw new Error(`Variant not found for product ${product._id}`);
-      unitPrice = variant.price;
-      stockAvailable = variant.stock ?? stockAvailable;
+    if (!product) {
+      throw new Error(`Product not found: ${productId}`);
     }
+
+    // Resolve variant
+    let targetVariant;
+
+    // 1. Direct variantId (Product Detail Page)
+    if (item.variantId) {
+      targetVariant = product.variants.id(item.variantId);
+    }
+
+    // 2. Size string (e.g., "500ml")
+    if (!targetVariant && item.size) {
+      targetVariant = product.variants.find(v => v.size === item.size);
+    }
+
+    // 3. Fallback to first variant
+    if (!targetVariant) {
+      targetVariant = product.variants[0];
+    }
+
+    if (!targetVariant) {
+      throw new Error(`No valid variant for product ${product._id}`);
+    }
+
+    const unitPrice = Number(targetVariant.price);
+    const qty = Number(item.quantity || 1);
 
     // Check stock
-    if (stockAvailable < item.quantity) {
-      throw new Error(`Insufficient stock for product ${product._id}. Available: ${stockAvailable}`);
+    if (targetVariant.stock < qty) {
+      throw new Error(`Insufficient stock for ${product.name} (${targetVariant.size}). Available: ${targetVariant.stock}`);
     }
 
-    const lineTotal = Number((unitPrice * item.quantity).toFixed(2));
+    const lineTotal = Number((unitPrice * qty).toFixed(2));
     subtotal += lineTotal;
 
     breakdownItems.push({
       productId: product._id,
-      name: product.name,
-      sku: product.sku,
+      variant: targetVariant.size,
       unitPrice,
-      quantity: item.quantity,
+      quantity: qty,
       lineTotal
     });
   }
 
-  // Shipping policy: free over 499, else 99 (your existing logic)
+  // Apply your shipping rule
   const shippingFee = subtotal > 499 ? 0 : 99;
-  const tax = 0; // if you have tax rules, compute here
+
+  const tax = 0; // modify if needed
   const total = Number((subtotal + shippingFee + tax).toFixed(2));
   const totalPaise = Math.round(total * 100);
 
@@ -977,39 +995,6 @@ router.post('/phonepe/check-status', async (req, res) => {
   } catch (err) {
     console.error('[check-status] unexpected error:', err?.response?.data || err?.message || err);
     return res.status(500).json({ success: false, message: 'Status check failed', error: err?.message || 'unknown' });
-  }
-});
-// POST /api/payments/phonepe/events
-// Purpose: proxy events/batch (or any other PhonePe endpoint) to avoid CORS and keep tokens server-side.
-router.post('/payments/phonepe/events', async (req, res) => {
-  try {
-    // get server-side PhonePe token (your existing helper)
-    const accessToken = await getAuthToken();
-    if (!accessToken) {
-      console.error('[phonepe:proxy] missing access token');
-      return res.status(500).json({ success: false, message: 'PhonePe auth failed' });
-    }
-
-    // PhonePe preprod endpoint - keep in env in production
-    const PHONEPE_EVENTS_URL = process.env.PHONEPE_EVENTS_URL || 'https://api-preprod.phonepe.com/apis/pg-meta/client/v1/events/batch';
-
-    // Forward request to PhonePe server-to-server
-    const response = await axios.post(PHONEPE_EVENTS_URL, req.body, {
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `O-Bearer ${accessToken}`
-        // add other headers if PhonePe docs require them
-      },
-      timeout: 15000
-    });
-
-    // Relay PhonePe response back to the browser (status preserved)
-    return res.status(response.status).json(response.data);
-  } catch (err) {
-    console.error('[phonepe:proxy] error forwarding events:', err?.response?.data || err?.message || err);
-    const status = err?.response?.status || 502;
-    const body = err?.response?.data || { success: false, message: err?.message || 'Upstream error' };
-    return res.status(status).json(body);
   }
 });
 /* ---------------------------
