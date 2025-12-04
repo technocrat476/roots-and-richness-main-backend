@@ -2,7 +2,7 @@
 import ejs from "ejs";
 import path from "path";
 import fs from "fs-extra";
-import puppeteer from "puppeteer";
+import puppeteer, { executablePath } from "puppeteer";
 import { fileURLToPath } from "url";
 
 // Fix __dirname since it's not available in ESM
@@ -22,6 +22,7 @@ export async function generateInvoicePDF(templateData, opts = {}) {
   // Launch puppeteer
   const browser = await puppeteer.launch({
     headless: "new",
+    executablePath: executablePath(),
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
   });
   const page = await browser.newPage();
