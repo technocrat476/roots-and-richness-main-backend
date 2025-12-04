@@ -15,6 +15,11 @@ const TEMP_DIR = path.join(__dirname, "../tmp_invoices");
 
 fs.ensureDirSync(TEMP_DIR);
 
+export function doesInvoiceExist(filename) {
+  const filePath = path.join("/opt/render/project/src/tmp_invoices", filename);
+  return fs.existsSync(filePath);
+}
+console.log("Exists?", doesInvoiceExist("invoice_693096bedb6e44a44dad1420_1764861533532.pdf"));
 export async function generateInvoicePDF(templateData) {
   const html = await ejs.renderFile(INVOICE_VIEW, templateData);
 
