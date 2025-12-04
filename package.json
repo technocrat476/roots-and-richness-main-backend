@@ -10,6 +10,7 @@
     "test": "jest"
   },
   "dependencies": {
+    "@sparticuz/chromium": "^141.0.0",
     "bcryptjs": "^2.4.3",
     "cloudinary": "^1.41.0",
     "compression": "^1.7.4",
@@ -35,7 +36,7 @@
     "nodemailer": "^6.9.7",
     "pg-sdk-node": "https://phonepe.mycloudrepo.io/public/repositories/phonepe-pg-sdk-node/releases/v2/phonepe-pg-sdk-node.tgz",
     "phonepe-pg-sdk-node": "^2.0.2",
-    "puppeteer": "^24.32.0",
+    "puppeteer-core": "^24.32.0",
     "razorpay": "^2.9.2",
     "stripe": "^14.9.0",
     "uuid": "^9.0.1",

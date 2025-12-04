@@ -2,7 +2,8 @@
 import ejs from "ejs";
 import path from "path";
 import fs from "fs-extra";
-import puppeteer, { executablePath } from "puppeteer";
+import chromium from "@sparticuz/chromium";
+import puppeteer from "puppeteer-core";
 import { fileURLToPath } from "url";
 
 // Fix __dirname since it's not available in ESM
@@ -14,31 +15,15 @@ const TEMP_DIR = path.join(__dirname, "../tmp_invoices");
 
 fs.ensureDirSync(TEMP_DIR);
 
-function getChromiumPath() {
-  const basePath = "/opt/render/.cache/puppeteer/chrome";
-
-  if (!fs.existsSync(basePath)) {
-    throw new Error("Chromium base path not found on Render");
-  }
-
-  const folders = fs.readdirSync(basePath).filter(f => f.startsWith("linux-"));
-  if (folders.length === 0) {
-    throw new Error("No Chromium versions found in cache");
-  }
-
-  const versionFolder = folders[0]; // first one
-  return path.join(basePath, versionFolder, "chrome-linux64", "chrome");
-}
-// generatePDF returns a Buffer
-export async function generateInvoicePDF(templateData, opts = {}) {
-  // Render HTML from EJS
+export async function generateInvoicePDF(templateData) {
   const html = await ejs.renderFile(INVOICE_VIEW, templateData);
 
   // Launch puppeteer
   const browser = await puppeteer.launch({
-    headless: "new",
-    executablePath: getChromiumPath(),
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    args: chromium.args,
+    defaultViewport: chromium.defaultViewport,
+    executablePath: await chromium.executablePath(),
+    headless: chromium.headless,
   });
   const page = await browser.newPage();
 
