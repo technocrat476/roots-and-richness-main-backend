@@ -14,6 +14,21 @@ const TEMP_DIR = path.join(__dirname, "../tmp_invoices");
 
 fs.ensureDirSync(TEMP_DIR);
 
+function getChromiumPath() {
+  const basePath = "/opt/render/.cache/puppeteer/chrome";
+
+  if (!fs.existsSync(basePath)) {
+    throw new Error("Chromium base path not found on Render");
+  }
+
+  const folders = fs.readdirSync(basePath).filter(f => f.startsWith("linux-"));
+  if (folders.length === 0) {
+    throw new Error("No Chromium versions found in cache");
+  }
+
+  const versionFolder = folders[0]; // first one
+  return path.join(basePath, versionFolder, "chrome-linux64", "chrome");
+}
 // generatePDF returns a Buffer
 export async function generateInvoicePDF(templateData, opts = {}) {
   // Render HTML from EJS
@@ -22,7 +37,7 @@ export async function generateInvoicePDF(templateData, opts = {}) {
   // Launch puppeteer
   const browser = await puppeteer.launch({
     headless: "new",
-    executablePath: executablePath(),
+    executablePath: getChromiumPath(),
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
   });
   const page = await browser.newPage();
