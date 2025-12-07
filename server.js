@@ -32,6 +32,7 @@ import uploadRoutes from './routes/upload.js';
 import subscriberRoutes from './routes/subscribers.js';
 import contactRouter from './routes/contact.js';
 import trackRouter from './routes/track.js';
+import sitemapRouter from './routes/sitemap.js';
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -242,6 +243,7 @@ app.use('/api/upload', uploadRoutes);
 app.use('/api/subscribe', subscriberRoutes);
 app.use('/api/contact', contactRouter);
 app.use('/api', trackRouter);
+app.use(sitemapRouter);
 
 /* ──────────────────────────────────────────
    404 handler + centralized error handler
