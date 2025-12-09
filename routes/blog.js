@@ -2,6 +2,8 @@ import express from 'express';
 import Blog from '../models/Blog.js';
 import { protect, admin, optionalAuth } from '../middleware/auth.js';
 import { validateBlog } from '../middleware/validation.js';
+import sanitizeHtml from 'sanitize-html';
+import { normalizeIncomingHtml } from '../utils/html-normalize.js';
 
 const router = express.Router();
 
@@ -186,21 +188,37 @@ router.get('/:slug', optionalAuth, async (req, res) => {
 // @route   POST /api/blog
 // @access  Private/Admin
 router.post('/', protect, admin, validateBlog, async (req, res) => {
-  try {
-    req.body.author = req.body.author || req.user.name || "Admin";
-    
-    if (req.body.status === 'published' && !req.body.publishedAt) {
-      req.body.publishedAt = new Date();
-    }
+try {
+  const author = req.body.author || req.user?.name || 'Admin';
 
-    const blog = await Blog.create(req.body);
+  // Normalize / decode content
+  const cleanedContent = normalizeIncomingHtml(req.body.content);
 
-    res.status(201).json({
-      success: true,
-      message: 'Blog created successfully',
-      blog
-    });
+  // Normalize featured shape
+  const featured = (req.body.featured === true || req.body.featured === 'true');
+
+  // Normalize featuredImage
+  const featuredImage = typeof req.body.featuredImage === 'string'
+    ? { url: req.body.featuredImage, alt: req.body.title || 'Blog image' }
+    : (req.body.featuredImage || { url: '', alt: req.body.title || 'Blog image' });
+
+  const payload = {
+    title: req.body.title,
+    slug: req.body.slug,
+    excerpt: req.body.excerpt || '',
+    content: cleanedContent,
+    author,
+    category: req.body.category || 'General',
+    featuredImage,
+    status: req.body.status || 'draft',
+    featured,
+    publishedAt: req.body.status === 'published' ? (req.body.publishedAt || new Date()) : req.body.publishedAt,
+  };
+
+  const blog = await Blog.create(payload);
+  res.status(201).json({ success: true, message: 'Blog created successfully', blog });
   } catch (error) {
+    console.error("Create blog error:", error);
     res.status(500).json({
       success: false,
       message: 'Server error',
@@ -213,37 +231,45 @@ router.post('/', protect, admin, validateBlog, async (req, res) => {
 // @route   PUT /api/blog/:id
 // @access  Private/Admin
 router.put('/:id', protect, admin, async (req, res) => {
-  try {
-    const blog = await Blog.findById(req.params.id);
+try {
+  const blog = await Blog.findById(req.params.id);
+  if (!blog) return res.status(404).json({ success: false, message: 'Blog not found' });
 
-    if (!blog) {
-      return res.status(404).json({
-        success: false,
-        message: 'Blog not found'
-      });
-    }
-     if (!req.body.author && blog.author) {
-     req.body.author = blog.author; // keep existing
-     }
-    // If publishing for the first time, set publishedAt
-    if (req.body.status === 'published' && blog.status !== 'published') {
-      req.body.publishedAt = new Date();
-    }
-console.log("Incoming blog update data:", req.body);
-    const updatedBlog = await Blog.findByIdAndUpdate(
-      req.params.id,
-      req.body,
-      {
-        new: true,
-        runValidators: true
-      }
-    );
-    res.status(200).json({
-      success: true,
-      message: 'Blog updated successfully',
-      blog: updatedBlog
-    });
+  const cleanedContent = normalizeIncomingHtml(req.body.content ?? blog.content ?? '');
+  const featured = (req.body.featured === true || req.body.featured === 'true');
+
+  let featuredImage = blog.featuredImage || { url: '', alt: '' };
+  if (typeof req.body.featuredImage === 'string') {
+    featuredImage = { url: req.body.featuredImage, alt: req.body.featuredImageAlt || req.body.title || blog.title || 'Blog image' };
+  } else if (req.body.featuredImage && typeof req.body.featuredImage === 'object') {
+    featuredImage = {
+      url: req.body.featuredImage.url || featuredImage.url,
+      alt: req.body.featuredImage.alt || featuredImage.alt,
+    };
+  }
+
+  // publishedAt logic unchanged
+  let publishedAt = blog.publishedAt;
+  if (req.body.status === 'published' && blog.status !== 'published') publishedAt = new Date();
+  if (req.body.publishedAt) publishedAt = req.body.publishedAt;
+
+  const payload = {
+    title: req.body.title ?? blog.title,
+    slug: req.body.slug ?? blog.slug,
+    excerpt: req.body.excerpt ?? blog.excerpt,
+    content: cleanedContent,
+    author: req.body.author || blog.author || req.user?.name || 'Admin',
+    category: req.body.category ?? blog.category ?? 'General',
+    featuredImage,
+    status: req.body.status ?? blog.status,
+    featured,
+    publishedAt,
+  };
+
+  const updatedBlog = await Blog.findByIdAndUpdate(req.params.id, payload, { new: true, runValidators: true });
+  res.status(200).json({ success: true, message: 'Blog updated successfully', blog: updatedBlog });
   } catch (error) {
+    console.error("Update blog error:", error);
     res.status(500).json({
       success: false,
       message: 'Server error',
