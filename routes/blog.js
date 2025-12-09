@@ -2,7 +2,6 @@ import express from 'express';
 import Blog from '../models/Blog.js';
 import { protect, admin, optionalAuth } from '../middleware/auth.js';
 import { validateBlog } from '../middleware/validation.js';
-import sanitizeHtml from 'sanitize-html';
 import { normalizeIncomingHtml } from '../utils/html-normalize.js';
 
 const router = express.Router();
