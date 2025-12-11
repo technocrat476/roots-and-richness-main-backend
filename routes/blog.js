@@ -405,7 +405,6 @@ router.post('/:id/like', protect, async (req, res) => {
 // @route   GET /api/blog/admin/:id
 // @access  Private/Admin
 router.get('/admin/:id', protect, admin, async (req, res) => {
-  console.log("📩 Incoming request for blog:", req.params.id);
   try {
     const blog = await Blog.findById(req.params.id);
     if (!blog) {
